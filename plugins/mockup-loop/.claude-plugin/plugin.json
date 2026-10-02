@@ -1,0 +1,12 @@
+{
+  "name": "mockup-loop",
+  "version": "0.1.0",
+  "description": "Pick UI variants by clicking: Claude renders the variants side by side in a local page served on 127.0.0.1, you click the one that fits, and Claude builds the next round from your pick while the page reloads itself, until the design is right and gets implemented 1:1.",
+  "author": {
+    "name": "Tulgs61"
+  },
+  "homepage": "https://github.com/Tulgs61/claude-plugins",
+  "repository": "https://github.com/Tulgs61/claude-plugins",
+  "license": "MIT",
+  "keywords": ["mockup", "ui", "design", "variants", "prototype", "click-to-pick", "local-server"]
+}

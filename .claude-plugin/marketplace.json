@@ -1,0 +1,27 @@
+{
+  "name": "tulgs61-plugins",
+  "description": "Claude Code plugins for session continuity (handover), delegated, reviewed task runs (tasks-ledger) and picking UI variants by clicking in a local mockup page (mockup-loop).",
+  "owner": {
+    "name": "Tulgs61"
+  },
+  "plugins": [
+    {
+      "name": "handover",
+      "source": "./plugins/handover",
+      "description": "Session continuity for Claude Code: /handover writes one HANDOVER.md per repo, /pickup continues from it with a drift check, /fresh clears context and carries the next prompt across /clear. A SessionStart hook re-injects the handover after /fresh and reminds Claude to re-read the active plan and task ledger after compaction or resume.",
+      "version": "0.1.0"
+    },
+    {
+      "name": "tasks-ledger",
+      "source": "./plugins/tasks-ledger",
+      "description": "Run a list of tasks as a delegated, reviewed workflow: a JSON task ledger with dependencies and file ownership, one task-implementer per task in its own git worktree, an independent reviewer per task, dependency-ordered local merges, and optional draft PRs. Includes dispatch-contract and verify-gate hooks.",
+      "version": "0.1.0"
+    },
+    {
+      "name": "mockup-loop",
+      "source": "./plugins/mockup-loop",
+      "description": "Pick UI variants by clicking: Claude renders the variants side by side in a local page served on 127.0.0.1, you click the one that fits, and Claude builds the next round from your pick while the page reloads itself, until the design is right and gets implemented 1:1.",
+      "version": "0.1.0"
+    }
+  ]
+}

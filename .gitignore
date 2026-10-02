@@ -1,0 +1,5 @@
+.claude/worktrees/
+.claude/runs/
+.claude/private/
+.DS_Store
+node_modules/
