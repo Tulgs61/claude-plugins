@@ -23,6 +23,7 @@ const RUN_STATUSES = ['finished', 'running', 'stopped'];
 const LOCK_TTL_MS = 6 * 60 * 60 * 1000;
 const GUARD_STALE_MS = 10 * 1000;
 const GUARD_WAIT_MAX_MS = 30 * 1000;
+const TAKEOVER_SETTLE_MS = 1500;
 const DEFAULT_CHECK_TIMEOUT_MIN = 30;
 const EVIDENCE_MAX = 4000;
 const TAIL_MAX = 2000;
@@ -330,13 +331,15 @@ const processAlive = pid => {
 // Takes the lock under the guard. A live foreign lock is refused unless `takeover` is given.
 // `takeover` replaces the lock of a run, not one a concurrent prepare has just taken: it refuses a
 // lock written since this call started and a lock whose prepare is still running.
-// Returns { previous, written }: the lock text before the call (null when there was none) and the
-// text this call wrote; the written lock is marked `preparing` until settleLock.
+// Returns { previous, written, tookOver }: the lock text before the call (null when there was none),
+// the text this call wrote, and whether it replaced a live foreign lock; the written lock is marked
+// `preparing` until settleLock.
 function acquireLock(ctx, runId, takeover) {
   return withLockGuard(ctx, () => {
     const previous = readLockText(ctx);
     const held = previous === null ? null : parseLock(previous);
-    if (isLiveForeign(held, runId)) {
+    const tookOver = Boolean(isLiveForeign(held, runId));
+    if (tookOver) {
       const at = Number(held.at);
       const sinceStart = at >= ctx.startedAt && at <= Date.now();
       const preparing = held.preparing === true && processAlive(held.pid);
@@ -345,7 +348,7 @@ function acquireLock(ctx, runId, takeover) {
     const at = Date.now();
     const written = JSON.stringify({ runId, at, pid: process.pid, preparing: true }) + '\n';
     writeAtomic(ctx.lockFile, written);
-    return { previous, written, runId, at };
+    return { previous, written, runId, at, tookOver };
   });
 }
 
@@ -365,14 +368,17 @@ function restoreLock(ctx, { previous, written }) {
   });
 }
 
-// Removes the lock. With a runId, only a lock naming that run is removed.
-function removeLock(ctx, runId) {
+// Runs `write` and removes the lock, all under the guard. With a runId, a live lock of another run
+// fails the call before anything is written, and only a lock naming that run is removed.
+function finishUnderLock(ctx, runId, write) {
   withLockGuard(ctx, () => {
-    if (runId !== undefined) {
-      const lock = readLock(ctx);
-      if (!lock || lock.runId !== runId) return;
+    const lock = runId === undefined ? null : readLock(ctx);
+    if (runId !== undefined && isLiveForeign(lock, runId)) {
+      const age = Math.round((Date.now() - Number(lock.at)) / 60000);
+      fail(`another run (${lock.runId}, heartbeat ${age} min ago) holds this ledger; finish of ${runId} changed nothing (locked: true)`, { locked: true });
     }
-    fs.rmSync(ctx.lockFile, { force: true });
+    write();
+    if (runId === undefined || (lock && lock.runId === runId)) fs.rmSync(ctx.lockFile, { force: true });
   });
 }
 
@@ -446,10 +452,11 @@ function ingestInbox(ctx) {
 
 function opFinish(ctx, [runStatus, reason, runId]) {
   if (!RUN_STATUSES.includes(runStatus)) fail(`bad runStatus ${runStatus}: expected one of ${RUN_STATUSES.join(', ')}`);
-  ctx.L.runStatus = runStatus;
-  ctx.L.stopReason = reason === undefined ? null : reason;
-  persistLedger(ctx);
-  removeLock(ctx, runId);
+  finishUnderLock(ctx, runId, () => {
+    ctx.L.runStatus = runStatus;
+    ctx.L.stopReason = reason === undefined || reason === '' ? null : reason;
+    persistLedger(ctx);
+  });
   return { runStatus, tasks: listing(ctx.L) };
 }
 
@@ -554,6 +561,8 @@ function opPrepare(ctx, [runId, takeover]) {
     L.integrationBranch = intBranch;
     persistLedger(ctx);
     consume();
+    // A racing takeover that started late still finds this lock `preparing` and is refused.
+    if (lock.tookOver) sleepMs(Math.max(0, lock.at + TAKEOVER_SETTLE_MS - Date.now()));
     try {
       settleLock(ctx, lock);
     } catch {
@@ -864,7 +873,9 @@ const COMMANDS = {
 };
 
 function main(argv) {
-  const startedAt = Date.now();
+  // When the process was created, not when this script began to run: concurrently spawned callers
+  // may need very different times to boot.
+  const startedAt = Math.floor(Date.now() - process.uptime() * 1000);
   const [cmd, ledgerArg, ...rest] = argv;
   if (!cmd || !ledgerArg) fail(`usage: tasks-git.js <${Object.keys(COMMANDS).join('|')}> <ledger> [args...]`);
   if (!Object.prototype.hasOwnProperty.call(COMMANDS, cmd)) fail(`unknown command ${cmd}`);

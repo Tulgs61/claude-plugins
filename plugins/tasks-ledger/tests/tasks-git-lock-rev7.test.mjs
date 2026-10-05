@@ -22,7 +22,7 @@ test('finish with another run id leaves that run\'s lock in place', t => {
   sb.ok('prepare', 'run-one');
   sb.ok('prepare', 'run-two', 'takeover');
   const before = readFileSync(sb.lockFile, 'utf8');
-  sb.ok('finish', 'stopped', 'superseded', 'run-one');
+  assert.equal(sb.run('finish', 'stopped', 'superseded', 'run-one').ok, false);
   assert.equal(readFileSync(sb.lockFile, 'utf8'), before);
   assert.equal(lockOf(sb).runId, 'run-two');
   assert.equal(existsSync(guardOf(sb)), false);
