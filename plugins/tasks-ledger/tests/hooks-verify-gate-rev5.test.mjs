@@ -4,10 +4,12 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, chmodSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, chmodSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withConsentStore, approveCheck } from './helpers/verify-consent.mjs';
 
 const GATE = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'verify-gate.js');
 const POSIX = process.platform !== 'win32';
@@ -18,8 +20,12 @@ after(() => rmSync(root, { recursive: true, force: true }));
 // Isolated temp dir for the hook's own state files.
 const hookTmp = join(root, 'tmp');
 mkdirSync(hookTmp);
-const env = { ...process.env, TMPDIR: hookTmp, TEMP: hookTmp, TMP: hookTmp };
-const stateFile = session => join(hookTmp, `claude-verify-${session}.json`);
+// Rev 10 amendment 12: a fresh consent store, so the checks these tests run can be approved.
+const env = withConsentStore({ ...process.env, TMPDIR: hookTmp, TEMP: hookTmp, TMP: hookTmp }, root);
+// Rev 10 amendment 1: the name also carries the first 16 hex digits of the sha256 of the project path
+// (its real path, amendment 16).
+const stateFile = (session, project) =>
+  join(hookTmp, `claude-verify-${session}-${createHash('sha256').update(realpathSync(project)).digest('hex').slice(0, 16)}.json`);
 
 // A fake repository (a .git directory marks the root) with an owner-only-writable verify.cmd.
 function makeRepo(name, verify) {
@@ -29,6 +35,7 @@ function makeRepo(name, verify) {
   const file = join(repo, '.claude', 'verify.cmd');
   writeFileSync(file, verify);
   chmodSync(file, 0o644);
+  approveCheck(env, repo, verify);
   return repo;
 }
 
@@ -57,7 +64,7 @@ test('amendment 1: a check ended for too much output is a failed run that blocks
     assert.match(r.stderr, new RegExp(`failure ${i} of 3`));
     // Only a tail of the output reaches Claude.
     assert.ok(r.stderr.length < 10000, `stderr length ${r.stderr.length}`);
-    assert.deepEqual(JSON.parse(readFileSync(stateFile(session), 'utf8')), { dirty: true, failures: i });
+    assert.deepEqual(JSON.parse(readFileSync(stateFile(session, repo), 'utf8')), { dirty: true, failures: i });
   }
 
   // The third consecutive overflow gives up like any other failure.
@@ -79,6 +86,7 @@ test('amendment 1: an overflow counts together with ordinary failures', { skip: 
   assert.match(first.stderr, /verification FAILED \(exit 1\)/);
 
   writeFileSync(join(repo, '.claude', 'verify.cmd'), FLOOD);
+  approveCheck(env, repo, FLOOD);
   const second = stop(session, repo);
   assert.equal(second.status, 2);
   assert.match(second.stderr, /failure 2 of 3/);
@@ -89,7 +97,7 @@ test('amendment 1: a check for which no process was created still lets the stop 
   const repo = makeRepo('no-process', 'exit 1\n');
   const session = 'rev5-no-process';
   assert.equal(edit(session, repo).status, 0);
-  const before = readFileSync(stateFile(session), 'utf8');
+  const before = readFileSync(stateFile(session, repo), 'utf8');
 
   // bash cannot be found on an empty PATH, so no process is created.
   const emptyBin = join(root, 'empty-bin');
@@ -98,5 +106,5 @@ test('amendment 1: a check for which no process was created still lets the stop 
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, '');
   assert.equal(r.stderr, '');
-  assert.equal(readFileSync(stateFile(session), 'utf8'), before);
+  assert.equal(readFileSync(stateFile(session, repo), 'utf8'), before);
 });

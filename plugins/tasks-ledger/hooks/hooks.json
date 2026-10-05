@@ -1,5 +1,5 @@
 {
-  "description": "tasks-ledger: dispatch contract guard for implementer agents and verify gate on Stop",
+  "description": "tasks-ledger: dispatch contract guard for implementer agents and verify gate on Stop and SubagentStop",
   "hooks": {
     "PreToolUse": [
       {
@@ -28,6 +28,18 @@
       }
     ],
     "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/verify-gate.js"],
+            "timeout": 240
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
       {
         "hooks": [
           {

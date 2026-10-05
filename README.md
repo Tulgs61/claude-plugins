@@ -110,24 +110,46 @@ command, usually a single line, that runs the repository's fast and safe checks 
 check; never a suite that reaches real databases or services) and exits 0 when they pass, for example
 `npm test --silent && npm run lint`. With `tasks-ledger` enabled:
 
-- the `Stop` hook runs it before a turn of the main session ends after edits. If it fails, the hook
+- the `Stop` and `SubagentStop` hooks run it before a turn ends after edits, in the main session and in
+  subagents (each in its own working directory, for example a task worktree). If it fails, the hook
   blocks that stop once and hands Claude the output tail. It blocks once per stop chain: the stop that
   follows a block is allowed (`stop_hook_active`), so a still-failing check does not hold the turn open.
   After 3 failed runs without a new edit it stops blocking and only warns. It is a nudge to fix the
   failure, not a guarantee that the turn ends green;
 - the `tasks-engine` workflow requires it to start a run and re-runs it in every task's worktree.
 
-Without the file the Stop gate does nothing. Subagents fire `SubagentStop`, not `Stop`, so the gate never
-runs when a subagent finishes. A `task-implementer` runs `verify.cmd` itself, and the workflow re-runs it
-in the task's worktree. Change `verify.cmd` outside a run: the workflow refuses to verify or merge a task
-whose branch changes it.
+Without the file the gate does nothing. Change `verify.cmd` outside a run: the workflow refuses to verify
+or merge a task whose branch changes it.
+
+**Approve it once per repository.** The gate runs a repository's `verify.cmd` only after that exact
+command was approved for that repository. A cloned repository is owned by you, so ownership checks
+cannot tell a hostile command apart, and hooks run outside Claude Code's permission prompts. The first
+time the gate meets an unapproved command it skips it and prints the approve command once, for example:
+
+```bash
+CLAUDE_PLUGIN_DATA='<plugin data dir>' node '<plugin root>/scripts/verify-consent.js' approve '<repo>'
+```
+
+Paste the command exactly as the gate printed it into bash or zsh in a terminal: its environment prefix
+selects the approval store the gate reads. It shows the command with any control or invisible characters
+escaped, plus its line count and hash, and records it only when you type `yes` at the terminal. A changed
+`verify.cmd` needs a new approval, and linked worktrees share the main checkout's approval. Use the same
+environment prefix with `verify-consent.js list` and `verify-consent.js revoke '<repo>'`; without it they
+work on a different store.
+
+The terminal prompt keeps a plain shell call from answering, but it is not the security boundary: a
+program can fake a terminal. The boundary is Claude Code's permission prompt. Deny any tool call that runs
+`verify-consent.js` or writes `verify-consent.json`, unless you asked for it.
+
+On native Windows the approve prompt is not available yet, so the gate never runs `verify.cmd` there.
 
 **Which file runs.** The hook starts from the working directory of the session that stops and takes the
 nearest `.claude/verify.cmd` between that directory and its git root (the repository or worktree root,
 inclusive). Outside a repository it looks only at `<cwd>/.claude/verify.cmd`. On POSIX it skips a
-`verify.cmd` that is not owned by the current user or is group- or world-writable.
+`verify.cmd` that is not owned by the current user or is group- or world-writable, and warns once per
+session and repository when it does.
 
-A skipped file silently disables the Stop gate. If your umask is `002` (common on Linux distributions
+A skipped file disables the gate. If your umask is `002` (common on Linux distributions
 with per-user groups), new files are group-writable. Git records only the executable bit, not the write
 bits, so every clone and every worktree created under umask `002` gets a group-writable `verify.cmd`
 again. Run this in each clone and each worktree:
@@ -150,8 +172,9 @@ only when it is a regular file owned by you and not group- or world-writable. Se
   hooks need Claude Code 2.1.139 or later. The scripts use only Node built-ins and fail open on internal
   errors. Read [`plugins/handover/hooks/`](plugins/handover/hooks/) and
   [`plugins/tasks-ledger/hooks/`](plugins/tasks-ledger/hooks/) before you enable them.
-- **`verify.cmd` runs with your user's rights.** Review `.claude/verify.cmd` in a repository you did not
-  write before you edit files there with `tasks-ledger` enabled.
+- **`verify.cmd` runs with your user's rights, and only after you approve it.** The gate never runs a
+  repository's `verify.cmd` until you have approved that exact command for that repository in a terminal
+  (see [the opt-in](#the-claudeverifycmd-opt-in)). Read the command before you type `yes`.
 - **Nothing is pushed by default.** Only when a ledger has `prs: true` (set only when you ask for PRs)
   does `tasks-git` push, and then only `task/<topic>/<id>` branches and, for a merged task with several
   prerequisites, its `task/<topic>/<id>-base` branch (the stacked PR's target). It never pushes the

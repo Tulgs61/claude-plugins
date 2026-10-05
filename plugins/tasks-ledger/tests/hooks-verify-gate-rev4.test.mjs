@@ -3,12 +3,15 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, readdirSync, chmodSync, symlinkSync, chownSync,
+  realpathSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withConsentStore, approveCheck } from './helpers/verify-consent.mjs';
 
 const GATE = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'verify-gate.js');
 const POSIX = process.platform !== 'win32';
@@ -19,8 +22,12 @@ after(() => rmSync(root, { recursive: true, force: true }));
 // Isolated temp dir for the hook's own state files.
 const hookTmp = join(root, 'tmp');
 mkdirSync(hookTmp);
-const env = { ...process.env, TMPDIR: hookTmp, TEMP: hookTmp, TMP: hookTmp };
-const stateFile = session => join(hookTmp, `claude-verify-${session}.json`);
+// Rev 10 amendment 12: a fresh consent store, so the checks these tests run can be approved.
+const env = withConsentStore({ ...process.env, TMPDIR: hookTmp, TEMP: hookTmp, TMP: hookTmp }, root);
+// Rev 10 amendment 1: the name also carries the first 16 hex digits of the sha256 of the project path
+// (its real path, amendment 16).
+const stateFile = (session, project) =>
+  join(hookTmp, `claude-verify-${session}-${createHash('sha256').update(realpathSync(project)).digest('hex').slice(0, 16)}.json`);
 
 // A fake repository (a .git directory marks the root) with an owner-only-writable verify.cmd.
 function makeRepo(name, verify) {
@@ -30,6 +37,7 @@ function makeRepo(name, verify) {
   const file = join(repo, '.claude', 'verify.cmd');
   writeFileSync(file, verify);
   chmodSync(file, 0o644);
+  approveCheck(env, repo, verify);
   return repo;
 }
 
@@ -45,7 +53,7 @@ test('amendment 1: a check that cannot be started lets the stop through and leav
   const session = 'rev4-no-start';
   assert.equal(edit(session, repo).status, 0);
   assert.equal(stop(session, repo).status, 2);
-  const before = readFileSync(stateFile(session), 'utf8');
+  const before = readFileSync(stateFile(session, repo), 'utf8');
   assert.deepEqual(JSON.parse(before), { dirty: true, failures: 1 });
 
   // bash cannot be found on an empty PATH, so spawning the check fails.
@@ -55,7 +63,7 @@ test('amendment 1: a check that cannot be started lets the stop through and leav
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, '');
   assert.doesNotMatch(r.stderr, /verification FAILED/);
-  assert.equal(readFileSync(stateFile(session), 'utf8'), before);
+  assert.equal(readFileSync(stateFile(session, repo), 'utf8'), before);
 
   // With bash available again the next stop still counts as the second failure.
   const again = stop(session, repo);
@@ -68,7 +76,7 @@ test('amendment 2: the state file is not written through a symbolic link', { ski
   const session = 'rev4-symlink-write';
   const target = join(root, 'symlink-target.txt');
   writeFileSync(target, 'untouched');
-  symlinkSync(target, stateFile(session));
+  symlinkSync(target, stateFile(session, repo));
   const r = edit(session, repo);
   assert.equal(r.status, 0);
   assert.equal(readFileSync(target, 'utf8'), 'untouched');
@@ -79,7 +87,7 @@ test('amendment 2: the state file is not read through a symbolic link', { skip: 
   const session = 'rev4-symlink-read';
   const target = join(root, 'dirty-state.json');
   writeFileSync(target, JSON.stringify({ dirty: true, failures: 0 }));
-  symlinkSync(target, stateFile(session));
+  symlinkSync(target, stateFile(session, repo));
   // The linked state would be dirty; not following the link makes the session clean.
   const r = stop(session, repo);
   assert.equal(r.status, 0, r.stderr);
@@ -90,14 +98,14 @@ test('amendment 2: the failure count is clamped to 0..3', { skip: !POSIX }, () =
   const repo = makeRepo('clamp', 'echo clamp-broken >&2; exit 1\n');
 
   // A negative count is raised to 0, so this run is the first failure.
-  writeFileSync(stateFile('rev4-clamp-low'), JSON.stringify({ dirty: true, failures: -5 }));
+  writeFileSync(stateFile('rev4-clamp-low', repo), JSON.stringify({ dirty: true, failures: -5 }));
   const low = stop('rev4-clamp-low', repo);
   assert.equal(low.status, 2);
   assert.match(low.stderr, /failure 1 of 3/);
-  assert.deepEqual(JSON.parse(readFileSync(stateFile('rev4-clamp-low'), 'utf8')), { dirty: true, failures: 1 });
+  assert.deepEqual(JSON.parse(readFileSync(stateFile('rev4-clamp-low', repo), 'utf8')), { dirty: true, failures: 1 });
 
   // A huge count is lowered to 3, so the gate gives up instead of misbehaving.
-  writeFileSync(stateFile('rev4-clamp-high'), JSON.stringify({ dirty: true, failures: 1e9 }));
+  writeFileSync(stateFile('rev4-clamp-high', repo), JSON.stringify({ dirty: true, failures: 1e9 }));
   const high = stop('rev4-clamp-high', repo);
   assert.equal(high.status, 0, high.stderr);
   assert.match(JSON.parse(high.stdout).systemMessage, /3 failed runs/);
@@ -109,8 +117,8 @@ test('amendment 2: a state file owned by another user is not read', {
 }, () => {
   const repo = makeRepo('foreign', 'echo foreign-used >&2; exit 1\n');
   const session = 'rev4-foreign';
-  writeFileSync(stateFile(session), JSON.stringify({ dirty: true, failures: 0 }));
-  chownSync(stateFile(session), 1, 1);
+  writeFileSync(stateFile(session, repo), JSON.stringify({ dirty: true, failures: 0 }));
+  chownSync(stateFile(session, repo), 1, 1);
   const r = stop(session, repo);
   assert.equal(r.status, 0, r.stderr);
   assert.doesNotMatch(r.stderr, /foreign-used/);

@@ -75,14 +75,15 @@ Both fail open: any internal error exits 0 and never wedges a turn.
 
 If you already registered your own copies of `dispatch-guard` or `verify-gate` in your settings
 (`~/.claude/settings.json` or a project's `.claude/settings.json`), remove them before you enable the
-plugin. Otherwise both copies run on every event, and the two verify gates share the same per-session state
-file name (`claude-verify-<session>.json` in the OS temp dir), so they clear and count each other's state.
+plugin. Otherwise both copies run on every event and the two verify gates share state files, so they
+clear and count each other's state. The state is kept per session and project, in
+`claude-verify-<session>-<project hash>.json` in the OS temp dir.
 
 | Event | Script | Effect |
 |---|---|---|
 | `PreToolUse` on `Agent` | [`dispatch-guard.js`](hooks/dispatch-guard.js) | Blocks (exit 2) an Agent call to `implementer` or `task-implementer` (any plugin prefix) whose prompt has no `PROOF` or no `BUDGET` section, and points at the dispatch skill. Other agents pass. |
-| `PostToolUse` on `Edit\|Write\|MultiEdit\|NotebookEdit` | [`verify-gate.js`](hooks/verify-gate.js) | Marks the session dirty (state file in the OS temp dir). |
-| `Stop` | [`verify-gate.js`](hooks/verify-gate.js) | If dirty, looks for `.claude/verify.cmd`: inside a repository from the working directory of the session that stops upward to the nearest directory that contains `.git` (the repository or worktree root) inclusive, nearest file wins; outside any repository only `<cwd>/.claude/verify.cmd`. On POSIX a `verify.cmd` not owned by the current user or group/world-writable is skipped. Runs it with bash in the directory where it was found (3-minute timeout). On failure it blocks that stop (exit 2) and hands Claude the output tail. It blocks once per stop chain: a stop that follows a block (`stop_hook_active`) is allowed without re-running the check. After 3 failed runs without a new edit it stops blocking and only warns. Does nothing without the file. It follows the hook input's `cwd` and ignores `CLAUDE_PROJECT_DIR`. Subagents fire `SubagentStop`, not `Stop`, so this gate does not run when a subagent finishes; task-implementers run `verify.cmd` themselves and the workflow re-runs it per worktree. |
+| `PostToolUse` on `Edit\|Write\|MultiEdit\|NotebookEdit` | [`verify-gate.js`](hooks/verify-gate.js) | Marks the edited file's project (its repository or worktree root) dirty for this session. |
+| `Stop`, `SubagentStop` | [`verify-gate.js`](hooks/verify-gate.js) | If the stopping session's or subagent's project is dirty, looks for `.claude/verify.cmd`: inside a repository from the working directory upward to the nearest directory that contains `.git` (the repository or worktree root) inclusive, nearest file wins; outside any repository only `<cwd>/.claude/verify.cmd`. On POSIX a `verify.cmd` not owned by the current user or group/world-writable is skipped, with a one-time warning. An unapproved command is skipped and the approve command is shown once (see [verify consent](../../README.md#the-claudeverifycmd-opt-in)). Runs an approved one with bash in the directory where it was found, in its own process group, with a 3-minute timeout after which the whole group is ended (on Windows only the direct child). On failure it blocks that stop (exit 2) and hands Claude the output tail. It blocks once per stop chain: a stop that follows a block (`stop_hook_active`) is allowed without re-running the check. After 3 failed runs without a new edit it stops blocking and only warns. Does nothing without the file. It follows the hook input's `cwd` and ignores `CLAUDE_PROJECT_DIR`. |
 
 ## Files
 
@@ -93,6 +94,7 @@ agents/                      task-implementer, reviewer
 hooks/                       hooks.json, dispatch-guard.js, verify-gate.js
 workflows/tasks-engine.js    the workflow /tasks runs
 scripts/tasks-git.js         every ledger and git side effect of the workflow (one JSON line per call)
+scripts/verify-consent.js    approve, list and revoke verify.cmd approvals
 schemas/tasks.schema.json    ledger schema
 rules/conventions.md         conventions the skills, agents and hooks follow
 tests/                       node:test suites
@@ -101,12 +103,13 @@ tests/                       node:test suites
 ## Security notes
 
 - **Hooks run `node`** on scripts from this plugin in every session where the plugin is enabled.
-  `dispatch-guard.js` only reads stdin. `verify-gate.js` writes a small state file to the OS temp dir and,
-  on `Stop` after edits, executes with bash and your user's rights the nearest `.claude/verify.cmd`
-  between the working directory and its repository root (only `<cwd>/.claude/verify.cmd` outside a
-  repository); on POSIX it ignores one not owned by you or writable by group or others. Review
-  `.claude/verify.cmd` in a repository you did not write before editing files there with the plugin
-  enabled.
+  `dispatch-guard.js` only reads stdin. `verify-gate.js` writes small state files to the OS temp dir and,
+  on `Stop` or `SubagentStop` after edits, executes with bash and your user's rights the nearest
+  `.claude/verify.cmd` between the working directory and its repository root (only
+  `<cwd>/.claude/verify.cmd` outside a repository), and only after you approved that exact command for
+  that repository in a terminal; on POSIX it ignores one not owned by you or writable by group or others.
+  Approvals live in the plugin's data directory (`verify-consent.json`). Read the command `approve` shows
+  you before typing `yes`.
 - **Nothing is pushed by default.** [`scripts/tasks-git.js`](scripts/tasks-git.js) pushes only when the
   ledger has `prs: true` (set only when you asked for PRs), and then only `task/<topic>/*` branches —
   never `task/<topic>/integration`, never a permanent branch. It opens draft PRs and never merges them.

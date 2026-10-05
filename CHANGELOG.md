@@ -46,6 +46,40 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ## tasks-ledger
 
+### [0.2.0] - 2026-10-06
+
+#### Changed
+
+- **The verify gate asks before it runs a repository's `verify.cmd`.** A cloned repository is owned by
+  you, so ownership checks cannot tell a hostile command apart. The gate now runs a `verify.cmd` only
+  after you approved that exact command for that repository. The first time it meets an unapproved one,
+  it skips it and prints the approve command once. Paste it exactly as printed into bash or zsh in a
+  terminal: its environment prefix selects the store the gate reads. It shows the command with control
+  and invisible characters escaped, its line count and hash, and records it only when you type `yes` at
+  the terminal. A changed `verify.cmd` needs a new approval, and linked worktrees (registered by git)
+  share the main checkout's approval. `verify-consent.js list` and `revoke` manage approvals with the
+  same prefix. The real boundary is Claude Code's permission prompt: deny tool calls that run
+  `verify-consent.js` or write its store unless you asked for them. **After upgrading, approve
+  `verify.cmd` once in each repository where you want the gate to keep running it.** On native Windows
+  the approve prompt is not available yet, so the gate does not run `verify.cmd` there.
+- The gate also runs on `SubagentStop`, so a subagent working in its own worktree is checked there.
+- State is kept per session and project (`claude-verify-<session>-<project hash>.json`), so an edit in
+  one repository and a stop in another no longer mix.
+
+#### Fixed
+
+- On timeout the whole process group of the check is ended (SIGTERM, then SIGKILL after 5 seconds), so
+  grandchildren of `verify.cmd` no longer linger. On Windows only the direct child is ended.
+- The state file is written atomically. An interrupted write can no longer leave an empty file that
+  reads as clean, and an unreadable state file of your own counts as dirty.
+- A numeric `session_id` no longer disables the gate.
+- A group- or world-writable `verify.cmd` is still skipped, now with a one-time warning that suggests
+  `chmod 644`.
+- `git` and `bash` are started by absolute path from outside the repository, so a program planted in the
+  repository can never be picked up.
+- Asynchronous errors, including a broken stdout, keep the hook's fail-open promise (exit 0, no
+  output).
+
 ### [0.1.0] - 2026-10-05
 
 #### Added

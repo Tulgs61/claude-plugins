@@ -96,15 +96,29 @@ the file (committed, so every worktree has it).
   it (that directory included) that contains `.git` (the repository or worktree root). Inside a
   repository it searches from the working directory upward to that root inclusive, and the nearest
   file wins. Outside any repository it checks only `<cwd>/.claude/verify.cmd`. On POSIX it skips
-  (treats as absent) a `verify.cmd` that is not owned by the current user or is group- or
-  world-writable. The command runs with bash in the directory where the file was found (timeout 3
-  minutes). The hook ignores `CLAUDE_PROJECT_DIR`. It is registered for `Stop` only, and
-  subagents fire `SubagentStop` instead, so it never gates a subagent. A failure blocks the stop
+  (treats as absent) a `verify.cmd` that is not owned by the current user. A group- or
+  world-writable `verify.cmd` is skipped as well, with a one-time warning per session and project
+  that suggests `chmod 644`. Under umask `002` git checks the file out group-writable in every
+  clone and worktree: run `chmod go-w .claude/verify.cmd` in each, or set `umask 022` before you
+  clone or create worktrees.
+- **Consent.** verify-gate runs a repository's `verify.cmd` only after the user approved that exact
+  command for that repository in a terminal, with the approve command the gate prints
+  (`node "<plugin root>/scripts/verify-consent.js" approve '<dir>'`, prefixed with the store it
+  uses). The script reads the
+  answer from the terminal, never from stdin or arguments, and a changed `verify.cmd` needs a new
+  approval. Any other way of recording consent is a tool call under Claude Code's permission
+  prompts; deny such a call unless you asked for it (a program can fake a terminal, so the prompt
+  alone is not the boundary). Until then the gate skips the check and asks once per session and
+  project. On native Windows the approve prompt is not available yet, so the gate never runs the
+  check there.
+- The command runs with bash in the directory where the file was found (timeout 3
+  minutes; the whole process group is ended on timeout). The hook ignores `CLAUDE_PROJECT_DIR`. It is
+  registered for `Stop` and `SubagentStop`, so a subagent working in its own worktree is gated in that
+  worktree. Its state is kept per session and project. A failure blocks the stop
   with the output tail; after 3 failed attempts it stops blocking and leaves the decision to the
   human. Without the file the hook does nothing.
 - Task-implementers run it before they finish, and the tasks workflow re-runs it in every task
   worktree and on the integration branch (after the ledger's `setup`, followed by its `suite`).
 - Change `verify.cmd` outside a run: `tasks-git` `verify` and `merge` refuse a task whose branch
   modifies it compared with the task's base.
-- The command runs with your user's rights. Review a cloned repository's `.claude/verify.cmd`
-  before you edit files in it with this plugin enabled.
+- The command runs with your user's rights. Read the command `approve` shows before you type `yes`.

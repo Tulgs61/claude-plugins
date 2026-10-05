@@ -165,9 +165,14 @@ Entries are sorted alphabetically, ignoring case and leading punctuation.
 Agent
 claude-verify-
 .claude/verify.cmd
+CLAUDE_CONFIG_DIR
+CLAUDE_PLUGIN_DATA
+${CLAUDE_PLUGIN_ROOT}
 Edit|Write|MultiEdit|NotebookEdit
+git rev-parse --git-common-dir
 hook_event_name
 implementer
+needs a terminal
 no BUDGET
 no PROOF
 no PROOF and no BUDGET
@@ -177,11 +182,13 @@ session_id
 Stop
 stop_hook_active
 subagent_type
+SubagentStop
 systemMessage
 task-implementer
+timeout after 180s
 tool_input
 verification FAILED (exit
-${CLAUDE_PLUGIN_ROOT}
+verify-consent.json
 ```
 
 ## Amendments (rev 4)
@@ -201,3 +208,242 @@ These amendments take precedence over the sections above where they differ. They
    not start" (rev 4, amendment 1). A check that started and was ended for producing more output than
    the hook accepts counts as a failed run, with the exit label `output limit exceeded`; it blocks
    and counts towards giving up like any other failure.
+
+## Amendments (rev 10)
+
+These amendments take precedence over every earlier section and amendment where they differ. They
+concern verify-gate only. dispatch-guard is unchanged. Group A (1-7) comes first; group B (8-12)
+builds on it.
+
+### Group A: robustness
+
+1. **Per-project state.** State is kept per session *and* per project, not per session alone.
+   - The project of an edit is found by walking up from the directory of the edited file
+     (`tool_input.file_path`, or `tool_input.notebook_path`) to the nearest ancestor that contains a
+     `.git` entry, which can be a directory or a file. If the input names no path, or no such
+     ancestor exists, the project is the event's `cwd`. The same walk, started at `cwd`, gives the
+     project of a stop.
+   - A linked worktree is its own project, because its `.git` is a file at its own root.
+   - The state file name is `claude-verify-<session>-<p>.json`. `<session>` is sanitised as before,
+     and `<p>` is the first 16 hex digits of the sha256 of the project's absolute path. The file
+     still lies directly in the temp directory.
+   - A stop only reads and writes the state of its own project. An edit in project X followed by a
+     stop whose `cwd` lies in project Y does not run Y's check.
+   - Kept tests that look for a state file "containing the session id" stay valid. Kept tests that
+     build the exact old file name `claude-verify-<session>.json` (in `hooks-verify-gate-rev4.test.mjs`
+     and `hooks-verify-gate-rev5.test.mjs`) may be changed to compute the new name, and only in that
+     respect.
+2. **Subagents.** `hooks.json` also registers verify-gate on `SubagentStop` (no matcher), with the same
+   `timeout` as the `Stop` registration. A `SubagentStop` is handled exactly like a `Stop`, using its own
+   `cwd` (the subagent's working directory, for example its worktree) and its own
+   `stop_hook_active`. A blocking failure exits 2 with the same stderr. This keeps the subagent
+   working. The failure count and give-up rule apply per session and project as in amendment 1.
+3. **Process group on timeout.** The check runs in its own process group (detached on POSIX).
+   - When the 3-minute limit passes, the gate sends SIGTERM to the whole group. If any member is
+     still alive 5 seconds later, it sends SIGKILL to the group. The run counts as a failure with the
+     exit label `timeout after 180s`, as before.
+   - The check's time limit plus the grace period stays below the registered hook `timeout`.
+   - On Windows only the direct child is ended, and the README says so.
+   - The output limit from rev 5 still applies. A check ended for too much output also has its group
+     ended the same way.
+4. **Atomic state writes.** The state is written to a new file in the same directory, created
+   exclusively with a random suffix and without following links, and then renamed over the state
+   file. An interrupted write never leaves an empty or partial state file behind. A state file that
+   cannot be parsed counts as dirty with 0 failures, never as clean.
+5. **Session id types.** A `session_id` that is a number is used as its decimal string. Only a missing,
+   `null` or empty-string id makes the gate do nothing (narrowing rev 4, amendment 3). Any other type
+   (object, array, boolean) also makes the gate do nothing.
+6. **Loose permissions warning.** When the only check file found is a regular file the user owns but
+   that is writable by group or others, it is still not run (unchanged).
+   - On the first stop per session and project where this happens, the gate prints one line of compact
+     JSON on stdout, whose only key is `systemMessage`. Its value says that `.claude/verify.cmd` was
+     skipped because it is group- or world-writable, and suggests `chmod 644`.
+   - Exit 0. The session stays dirty. Later stops in the same session and project stay silent.
+7. **Empty stdout.** Apart from the give-up message, the loose-permissions warning (amendment 6) and the
+   approval request (amendment 10), stdout is always empty.
+
+### Group B: consent
+
+8. **Threat model.** A repository cloned from an untrusted source is owned by the user, so ownership
+   and permission checks do not stop a hostile committed `verify.cmd`. Its `CLAUDE.md` may also
+   instruct the model to approve the command. Hooks run outside Claude Code's permission prompts, so
+   the gate must never run such a command on its own. It runs a check only after that exact command
+   was approved for that repository. Approval needs either a person answering at a terminal
+   (amendment 11) or a change to the consent store, which the model can only make through a tool call
+   that Claude Code's permission system governs. The gate itself never records consent.
+9. **Consent store.**
+   - It is a JSON file at `$CLAUDE_PLUGIN_DATA/verify-consent.json`. When `CLAUDE_PLUGIN_DATA` is unset
+     or empty, it is at `<config>/tasks-ledger/verify-consent.json`, where `<config>` is
+     `$CLAUDE_CONFIG_DIR` if set and non-empty, otherwise `~/.claude`.
+   - Environment variables only choose where the store is. Nothing bypasses it.
+   - It is read only when it is a regular file owned by the current user (POSIX). It is written
+     atomically as in amendment 4. Missing directories are created with mode 0700.
+   - An entry is the pair (repository identity, sha256 hex of the command bytes).
+     - The **repository identity** is the real path of the directory that `git rev-parse
+       --git-common-dir` reports when run in the directory that contains `.claude/`. So a main checkout
+       and all its linked worktrees share one identity. Outside a git repository, or when git fails,
+       the identity is the real path of the directory that contains `.claude/`.
+     - The **command bytes** are exactly the bytes that are passed to bash, taken from the content
+       already read through the trusted file descriptor. The gate never reads the file a second time
+       to hash it.
+10. **Unapproved check.** When the trusted check's pair is not in the store, the gate does not run it.
+    - It exits 0 and leaves the state untouched (the session stays dirty).
+    - On the first such stop per session and project, it prints one line of compact JSON on stdout,
+      whose only key is `systemMessage`. Its value names the check file's absolute path and the
+      approve command `node "<plugin root>/scripts/verify-consent.js" approve "<dir>"`. `<plugin root>`
+      is the gate's own plugin directory and `<dir>` is the directory containing `.claude/`. The value
+      also says the command must be run in a terminal. Later unapproved stops in that session and
+      project stay silent.
+    - A changed `verify.cmd` (a different hash) is unapproved again.
+11. **`scripts/verify-consent.js`.** A Node.js command-line script using only built-in modules. It
+    shares the store rules of amendment 9.
+    - `approve <dir>`: finds `<dir>/.claude/verify.cmd`, applies the same trust rules as the gate, and
+      prints the path and the full command.
+      - It then asks `Run this command after Claude edits files here? [yes/N]` and reads the answer
+        **from the controlling terminal** (`/dev/tty`), never from stdin.
+      - Only the exact answer `yes` records the pair and exits 0. Any other answer exits 1 and records
+        nothing.
+      - When there is no controlling terminal (opening `/dev/tty` fails), it exits 2 with
+        `needs a terminal` on stderr and records nothing. The terminal requirement keeps a plain shell
+        tool call from answering; it is not the security boundary. The boundary is amendment 8: anything
+        that records consent other than a person at a terminal is a tool call under Claude Code's
+        permission prompts.
+      - No command-line argument, environment variable or file can supply the answer. A seam for
+        tests, if any, is reachable only by code that loads the script as a module.
+    - `revoke <dir>`: removes every entry for that repository identity. Exit 0.
+    - `list`: prints one line per entry (identity, then the first 12 hex digits of the hash). Exit 0.
+    - Anything else prints usage and exits 2.
+12. **Tests.** Kept tests that expect the check to run must first approve it.
+    - They point `CLAUDE_PLUGIN_DATA` at a fresh temp directory and write the store entry directly
+      with a small test helper (the approve command cannot run without a terminal). The kept test
+      files `hooks.test.mjs`, `hooks-verify-gate-rev4.test.mjs` and `hooks-verify-gate-rev5.test.mjs`
+      may be changed for this setup only.
+    - The new tests cover:
+      - an unapproved check is not run, prints the request once, and keeps the session dirty;
+      - an approval in the main checkout makes the check run in a linked worktree of the same
+        repository;
+      - a changed command is unapproved;
+      - `approve` without a terminal exits 2 with `needs a terminal` and records nothing;
+      - `revoke` removes the entry;
+      - a store owned by another user, or a symlinked store, is ignored.
+13. **Tests for group A**, in new test files. Each of these must be able to fail:
+    - the failure count is clamped (a state file holding 99 failures gives up on the next failure and
+      not before; a negative count behaves as 0);
+    - as a non-root user, a directory or FIFO at the state path is not followed, opened or trusted;
+    - an edit between two failures resets the count;
+    - a symlinked `verify.cmd` is not run;
+    - a session id with `/` or `..` gives a state file directly in the temp directory;
+    - stdout is empty on block, pass and skip paths;
+    - an over-limit check reports `output limit exceeded`;
+    - plus one test per amendment 1-7, including a grandchild process ended by the timeout
+      (POSIX only), a numeric session id, an unparsable state file counting as dirty, and a
+      `SubagentStop` in another project's worktree running that worktree's check.
+
+### Group C: fixes after review of group A (implemented together with group B)
+
+14. **Fail-open covers asynchronous errors.** Any error the gate does not handle, including one thrown
+    in a timer or child-process callback and an unhandled `error` event on a child's pipes or on
+    stdout (for example EPIPE), ends the hook with exit 0 and no further output.
+15. **Unreadable own state is dirty.** Only a missing state file, or one that is rejected because it is
+    not a regular file or not owned by the user, counts as clean. Any other failure to read the user's
+    own state file counts as dirty with 0 failures.
+16. **Project identity from the real path.** The project path that names the state file (amendment 1)
+    is the real path of the project directory. When the edited file's directory does not exist yet,
+    the real path of its nearest existing ancestor is resolved and the rest is appended. An edit
+    through one symlinked spelling and a stop through another reach the same state.
+17. **Quoted hint.** The path in the `chmod 644` suggestion of amendment 6 is shell-quoted, single quotes
+    with embedded single quotes escaped.
+18. **Tests**, each able to fail before the change: an EPIPE on stdout gives exit 0; an own state file
+    with mode 000 counts as dirty; an edit through a symlinked repo path followed by a stop through the
+    real path runs the check; the loose-permissions warning is given once per project within one
+    session (two projects, two warnings), and names the absolute path of the skipped file.
+
+### Group D: security review of group B
+
+19. **Copy-safe approve command.** In the approval request of amendment 10, the plugin root and `<dir>`
+    are each shell-quoted with single quotes, embedded single quotes escaped (as in amendment 17). Pasting
+    the command into a POSIX shell never runs anything but `node` on the consent script, whatever
+    characters the paths contain (`$`, backticks, `"`, `;`, newlines). A path with a line break or other
+    control character is not offered as a command at all; the request then says that the directory
+    name contains control characters and gives no command.
+20. **What the user approves is what they see.** `approve` shows the command in a form that cannot hide
+    anything:
+    - every character outside printable ASCII and the space, apart from line feeds, is shown as an
+      escape such as `\x1b` or `‮`. This covers escape sequences, carriage returns, backspaces,
+      bidirectional controls and other invisible characters, and each line is prefixed with `| `;
+    - it also shows the line count and the first 12 hex digits of the sha256 that will be recorded;
+    - the hash recorded is the hash of exactly the bytes that were read and shown, as before.
+    The question is asked only after all of this has been written. Tests: a `verify.cmd` containing an
+    escape sequence, a carriage return that would overwrite the line, and U+202E is shown escaped; a
+    pasted approval request with `$(touch x)` in the directory name, run through `bash -c`, creates no
+    file.
+21. **The approve command reaches the gate's store.** The approval request names the store the gate
+    actually uses. The printed command starts with the environment assignment that selected that store,
+    shell-quoted: `CLAUDE_PLUGIN_DATA='<path>'` when `CLAUDE_PLUGIN_DATA` chose it, `CLAUDE_CONFIG_DIR='<path>'`
+    when that did, and nothing for the `~/.claude` default. So the command records into the same file
+    the gate reads, even when run from a plain terminal. Test: run the gate with `CLAUDE_PLUGIN_DATA` set,
+    take the printed command, and check that its environment prefix and arguments select that store (run
+    `approve` through the module seam with the parsed environment).
+22. **Foreign stores are tested without root.** The tests for a store, state file or check file owned by
+    another user run as a normal user. They preload a small module (`node --require`) that makes
+    `process.getuid()` return a different uid in the process under test. They are not skipped unless
+    the platform has no `getuid`.
+23. **`approve` never discards approvals silently.** When the store file exists but is unusable
+    (unparsable, a symlink, not a regular file, or owned by someone else), `approve` records nothing and
+    exits 2, naming the file and why it was not used. `revoke` behaves the same.
+24. **Kept tests and real paths.** The kept tests in `hooks-verify-gate-rev4.test.mjs` and
+    `hooks-verify-gate-rev5.test.mjs` may compute the project path as its real path when they compute
+    the state-file name (amendments 1 and 16), and only in that respect.
+
+### Group E: final review of the consent feature
+
+25. **No program from the untrusted directory.** The gate and the consent script never start a program
+    by bare name with the repository (or any directory inside it) as the working directory. `git` and
+    `bash` are resolved to absolute paths by searching `PATH` while skipping empty and relative entries
+    and the repository's own directories. The program is started with a neutral working directory (the
+    temp directory) and receives the repository through arguments (`git -C <dir>`). `bash` still runs the
+    check with the check's directory as its working directory, because that is part of the contract,
+    but it is started by absolute path. If no such program is found, the gate skips the check as for a
+    check that could not start.
+26. **Foreign-owner tests aim at one file.** The uid preload of amendment 22 takes the path it applies
+    to (through an environment variable that only the tests set), and changes the reported owner only
+    for that file. The gate-level tests then show that a foreign store is ignored (the approval request
+    appears, the check does not run) and that a foreign check file is not run, each next to a control run
+    in which the same setup with an own file runs the check.
+27. **The approve command pins the store.** The printed command sets every store variable explicitly:
+    the one that selected the store with its quoted value, and each higher-priority variable as empty
+    (`CLAUDE_PLUGIN_DATA=` before `CLAUDE_CONFIG_DIR='…'`, both empty for the default). So the command
+    records into the gate's store whatever the user's terminal exports. This replaces "nothing for the
+    `~/.claude` default" in amendment 21.
+28. **The right path is named.** When the command cannot be offered because a path contains control
+    characters, the request names which path it is: the plugin directory, the consent store or the
+    repository directory.
+29. **Display and question go to the same terminal.** `approve` writes the display of amendment 20 to the
+    controlling terminal it reads the answer from, synchronously, before the question. It also writes it
+    to stdout. With no controlling terminal it writes nothing and exits 2 as before.
+30. **Tests**, each able to fail before the change: a repository with an executable `git` (and `bash`)
+    file in the check directory and in its root, which must never run (POSIX: simulate by putting `.` or
+    the repository directory on `PATH`); the gate-level foreign-file tests of amendment 26; an approve
+    command run in a terminal environment that exports the other variables still records into the
+    gate's store; the control-character message names the plugin directory when only that path has one.
+31. **Inside means inside.** A path is inside a directory when its path relative to that directory is
+    empty, or is not absolute and its first segment is not exactly `..`. So `<repo>/..bin` is inside. The
+    excluded directories of amendment 25 also include the main working tree of a linked worktree (the
+    directory that contains the common git directory), as given and as its real path. With no
+    controlling terminal, `approve` writes nothing to stdout either: it opens the terminal first and
+    prints only `needs a terminal` on stderr when that fails. Tests: a planted `git` and `bash` in
+    `<repo>/..bin` on `PATH` never run; a planted one in the main checkout of a linked worktree never runs;
+    `approve` without a terminal leaves stdout empty.
+32. **A repository cannot borrow another's identity.** The repository identity of amendment 9 is accepted
+    only when the git directory really belongs to this checkout:
+    - for a main checkout, the common git directory is `<top>/.git` (real paths compared), where `<top>`
+      is the checkout's top level;
+    - for a linked worktree, the common git directory must hold a `worktrees/<name>/gitdir` file whose
+      content, resolved to a real path, is exactly this worktree's `.git` file. Git writes that back-reference
+      inside the main repository's own git directory, which the linked worktree's content cannot change;
+    - in every other case (a `.git` file or `commondir` pointing at a git directory that does not point
+      back), the identity is the real path of the directory that contains `.claude/` and of nothing
+      else. So no approval from another repository applies.
+    Tests: a repository whose `.git` file points at an approved repository's git directory, with the same
+    `verify.cmd`, does not run the check and shows the approval request; a real linked worktree of an
+    approved repository still runs it; a forged `commondir` is ignored.

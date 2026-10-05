@@ -7,6 +7,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, chmodSync, 
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withConsentStore, approveCheck } from './helpers/verify-consent.mjs';
 
 const HOOKS = join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks');
 const GUARD = join(HOOKS, 'dispatch-guard.js');
@@ -18,7 +19,8 @@ after(() => rmSync(root, { recursive: true, force: true }));
 // Isolated temp dir for the hook's own state files, so real session state is never read or written.
 const hookTmp = join(root, 'tmp');
 mkdirSync(hookTmp);
-const env = { ...process.env, TMPDIR: hookTmp, TEMP: hookTmp, TMP: hookTmp };
+// Rev 10 amendment 12: a fresh consent store, so the checks these tests run can be approved.
+const env = withConsentStore({ ...process.env, TMPDIR: hookTmp, TEMP: hookTmp, TMP: hookTmp }, root);
 
 // Writes a verify.cmd with explicit owner-only write permission, independent of the host's umask
 // (the hook skips group/world-writable files).
@@ -27,6 +29,7 @@ function writeVerify(dir, body, mode = 0o644) {
   const file = join(dir, '.claude', 'verify.cmd');
   writeFileSync(file, body);
   chmodSync(file, mode);
+  approveCheck(env, dir, body);
   return file;
 }
 
