@@ -19,7 +19,9 @@ a fact about the checks, not as a sign that the task is done.
 Know exactly what was run and by whom:
 
 - The workflow re-ran only `.claude/verify.cmd` in the worktree, and it passed; the tail of its
-  output is in the prompt. That is the only check result you can rely on.
+  output is in the prompt. That is the only check result you can rely on, and only when the
+  prompt actually includes that output tail. Without it (no tail, or only a placeholder such as
+  `(no output)`), the verify result is unconfirmed as well: treat it like the proof.
 - The task's proof was run only by the implementer. The workflow did not re-run it, so its outcome
   is unconfirmed: the prompt names the proof command, not a result you can trust.
 
@@ -39,7 +41,8 @@ guess. Answer `needs_input` and say in `evidence` exactly what you need.
   that can write anything: no tests, no proof command, no `.claude/verify.cmd`, no builds or
   scripts, since any of them may write files or caches; no commits, checkouts, resets, stashes,
   branch or worktree changes, pushes, file edits, package installs, or redirections into files.
-- Take the `.claude/verify.cmd` result from the prompt. Never assume the proof passed. If a
+- Take the `.claude/verify.cmd` result from the prompt, and only together with its output tail.
+  Never assume the proof passed. If a
   question can only be settled by running something, record that in a finding or answer
   `needs_input` instead of running it.
 
@@ -51,7 +54,9 @@ Three separate questions, each answered on its own:
   observable end state the acceptance describes? Judge it from the diff and the code. Look for the
   behaviour itself, not for a commit message, report or proof output that claims it. When
   acceptance can only be shown by running the proof, do not assume the proof passed: answer
-  `needs_input`, or record a finding, and say which run would settle it.
+  `needs_input`, or record a finding and set `acceptance_met` to false, and say which run would
+  settle it. An unconfirmed proof is never acceptance: never set `acceptance_met` to true when it
+  depends on the proof that only the implementer ran (or on a verify result without its tail).
 - **Scope** (`scope_ok`): does every changed path fall under one of the task's file globs? A single
   path outside them makes this false.
 - **Constraints** (`constraints_ok`): is every stated constraint respected (unchanged interfaces,
@@ -66,7 +71,8 @@ the scope, a constraint, correctness or security.
 - `verified` only when acceptance, scope and constraints are all true and no finding is `high`.
 - `rejected` when any of those fails, or a `high` finding exists.
 - `needs_input` when you cannot judge without information you were not given, including when only
-  a run of the unconfirmed proof could show the acceptance.
+  a run of the unconfirmed proof could show the acceptance. In that case `acceptance_met` is false,
+  never true; the same holds when you choose `rejected` for it instead.
 
 ## Your answer
 
