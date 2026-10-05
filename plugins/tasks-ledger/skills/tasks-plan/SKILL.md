@@ -32,13 +32,18 @@ the repository except the ledger file.
 - **`topic`, always**: every ledger you write, new or refreshed, has a top-level `topic` equal to the
   slug in its file name (the name without the `YYYY-MM-DD-` date and the `.json`). The helper names
   every branch and worktree after it and refuses a ledger without a valid one. If the file name has
-  no slug that matches the pattern, stop and report instead of writing. On a refresh:
-  - a missing `topic` is filled in from the file name;
-  - a `topic` that differs from the slug may be corrected only while every task is still `todo` or
-    `blocked`, so no task has run yet;
-  - if the `topic` differs and any task has left `todo`/`blocked`, stop and report the mismatch
-    (the stored `topic`, the file name's slug, and the tasks that have run) instead of rewriting it
-    or writing anything else. Branches and worktrees already exist under the stored name.
+  no slug that matches the pattern, stop and report instead of writing. On a refresh, a missing
+  `topic` or one that differs from the slug may be filled in or corrected only before the first run,
+  that is, only when all of these hold:
+  - `runStatus` is `planned` or absent;
+  - every task is `todo`, with `branch`, `base` and `worktree` all null (or absent);
+  - no `task/<stored topic>/` branch exists, local or remote
+    (`git for-each-ref refs/heads/task/<stored topic>/ 'refs/remotes/*/task/<stored topic>/*'`
+    prints nothing).
+
+  In every other case, stop and report the mismatch (the stored `topic`, the file name's slug, and
+  which of these conditions fails) instead of rewriting it or writing anything else. A run may
+  already have created branches and worktrees under the stored name.
 - **Existing ledger** (the input names one, or one for the same topic exists): first check for a
   `<same name>.lock` next to it. If that lock's `at` is less than six hours old, a run owns the
   ledger: do not write it; tell the caller to use `/tasks add` instead. Otherwise you may add tasks
@@ -103,7 +108,7 @@ Check the file against `${CLAUDE_PLUGIN_ROOT}/schemas/tasks.schema.json`: the re
 present, ids and `dependsOn` entries match `^T[0-9]+$`, statuses and `runStatus` are from their
 enums, and tasks carry no keys beyond the ones the schema lists. Check as well that `topic` is
 present, matches `^[a-z0-9][a-z0-9-]*$`, and equals the slug in the ledger's file name. Fix anything
-that does not pass, except a `topic` mismatch on a ledger where a task has already run: that one you
+that does not pass, except a `topic` mismatch that step 2 does not let you correct: that one you
 report, as step 2 says, and leave unchanged.
 
 Then reply briefly:

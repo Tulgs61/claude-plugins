@@ -52,22 +52,7 @@ test('rev5-1: acceptance is judged from the diff and code, never from an assumed
   assert.match(look, /no proof command/);
 });
 
-// 2. `topic` on refresh.
-test('rev5-2: a missing topic is filled in from the file name', () => {
-  const create = flat(section(PLAN, '2. Create or refresh'));
-  assert.match(create, /a missing `topic` is filled in from the file name/);
-});
-
-test('rev5-2: a different topic is corrected only before any task has run, else reported', () => {
-  const create = flat(section(PLAN, '2. Create or refresh'));
-  assert.match(create, /may be corrected only while every task is still `todo` or `blocked`/);
-  assert.match(create, /differs and any task has left `todo`\/`blocked`, stop and report the mismatch/);
-  assert.match(create, /instead of rewriting it/);
-  // The unconditional overwrite of rev 4 is gone, and validation does not bring it back.
-  assert.doesNotMatch(create, /holds a different value, set it from the file name/);
-  const validate = flat(section(PLAN, '5. Validate and reply'));
-  assert.match(validate, /except a `topic` mismatch on a ledger where a task has already run: that one you report/);
-});
+// 2. `topic` on refresh. Rev 7, amendment 1 replaces this topic rule; prose-rev7.test.mjs pins it.
 
 test('rev5-2: the not-yet-run statuses are the schema statuses that the plan leaves editable', () => {
   // Every schema status other than `todo`/`blocked` is one the plan keeps untouched, so it counts as run.
