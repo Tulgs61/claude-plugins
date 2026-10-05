@@ -80,8 +80,9 @@ enable in the project's `.claude/settings.json`:
 }
 ```
 
-List only the plugins the team should run. When a member trusts the project folder, Claude Code asks them
-whether to install the marketplace and its enabled plugins; nothing is installed without that answer.
+List only the plugins the team should run. The entries take effect only after a member accepts the
+workspace trust dialog for the folder; Claude Code then registers the marketplace and loads the listed
+plugins from it. Nothing from an untrusted folder is applied.
 Administrators can put the same two keys in managed settings to roll the plugins out across an
 organisation.
 

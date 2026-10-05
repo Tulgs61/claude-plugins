@@ -17,6 +17,7 @@ concurrency:
 
 jobs:
   release:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +59,14 @@ jobs:
             rc=0
             git ls-remote --exit-code --tags origin "refs/tags/${tag}" > /dev/null || rc=$?
             if [ "$rc" -eq 0 ]; then
-              echo "${tag}: tag exists, skipped"
+              # A run that pushed the tag but failed before the release left the release missing.
+              if gh release view "$tag" > /dev/null 2>&1; then
+                echo "${tag}: tag and release exist, skipped"
+              else
+                notes="$(node .github/scripts/changelog-section.mjs "$name" "$version")"
+                gh release create "$tag" --verify-tag --title "${name} ${version}" --notes "$notes"
+                echo "${tag}: release created for existing tag"
+              fi
               continue
             fi
             [ "$rc" -eq 2 ] || { echo "${tag}: tag lookup failed (exit ${rc})" >&2; exit 1; }
