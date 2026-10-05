@@ -23,20 +23,51 @@ function sessionStateFile(sessionId) {
   return path.join(os.tmpdir(), `claude-verify-${id}.json`);
 }
 
+const NOFOLLOW = (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0);
+
+function currentUid() {
+  return typeof process.getuid === 'function' ? process.getuid() : -1;
+}
+
+// A state file is only used when it is a regular file owned by the current user (POSIX).
+function ownStateFile(stat) {
+  if (!stat.isFile()) return false;
+  return process.platform === 'win32' || stat.uid === currentUid();
+}
+
+function clampFailures(n) {
+  return Number.isInteger(n) ? Math.min(Math.max(n, 0), MAX_FAILURES) : 0;
+}
+
+// Symbolic links are never followed, and a state file that belongs to another user is ignored.
 function readState(file) {
+  let fd;
   try {
-    const state = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (state && typeof state === 'object') {
-      return { dirty: state.dirty === true, failures: Number.isInteger(state.failures) ? state.failures : 0 };
+    fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW);
+    if (ownStateFile(fs.fstatSync(fd))) {
+      const state = JSON.parse(fs.readFileSync(fd, 'utf8'));
+      if (state && typeof state === 'object') {
+        return { dirty: state.dirty === true, failures: clampFailures(state.failures) };
+      }
     }
   } catch {
     // Missing or corrupt state counts as clean.
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
   return { dirty: false, failures: 0 };
 }
 
+// Writes without following a symbolic link; a file that is not the user's own is left alone.
 function writeState(file, state) {
-  fs.writeFileSync(file, JSON.stringify(state));
+  const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | NOFOLLOW, 0o600);
+  try {
+    if (!ownStateFile(fs.fstatSync(fd))) return;
+    fs.ftruncateSync(fd, 0);
+    fs.writeSync(fd, JSON.stringify({ dirty: state.dirty, failures: clampFailures(state.failures) }));
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function removeState(file) {
@@ -67,8 +98,7 @@ function findGitRoot(dir) {
 function isTrusted(stat) {
   if (!stat.isFile()) return false;
   if (process.platform === 'win32') return true;
-  const uid = typeof process.getuid === 'function' ? process.getuid() : -1;
-  return stat.uid === uid && (stat.mode & 0o022) === 0;
+  return stat.uid === currentUid() && (stat.mode & 0o022) === 0;
 }
 
 // Reads `file` only if it is trusted. Non-regular files are never opened, and the opened descriptor
@@ -81,10 +111,9 @@ function readTrusted(file) {
     return null;
   }
   if (!isTrusted(before)) return null;
-  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0) | (fs.constants.O_NONBLOCK || 0);
   let fd;
   try {
-    fd = fs.openSync(file, flags);
+    fd = fs.openSync(file, fs.constants.O_RDONLY | NOFOLLOW);
   } catch {
     return null;
   }
@@ -131,25 +160,30 @@ function onStop(input, stateFile) {
     maxBuffer: 64 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const timedOut = Boolean(result.error) && result.error.code === 'ETIMEDOUT';
+  // The check could not be started at all: let the stop through and leave the state as it was.
+  if (result.error && !timedOut) return 0;
   if (result.status === 0 && !result.error) {
     removeState(stateFile);
     return 0;
   }
 
   let code;
-  if (result.error && result.error.code === 'ETIMEDOUT') code = `timeout after ${TIMEOUT_MS / 1000}s`;
+  if (timedOut) code = `timeout after ${TIMEOUT_MS / 1000}s`;
   else if (result.status !== null && result.status !== undefined) code = String(result.status);
   else if (result.signal) code = result.signal;
-  else code = result.error ? result.error.code || 'error' : 'unknown';
+  else code = 'unknown';
   const output = tail(`${result.stdout || ''}${result.stderr || ''}`.trim());
   const failures = state.failures + 1;
 
   if (failures >= MAX_FAILURES) {
     removeState(stateFile);
     const oneLine = check.command.replace(/\s+/g, ' ');
-    const message =
+    // The whole value stays on one line, even when the directory name holds a line break.
+    const message = (
       `verify-gate: ${MAX_FAILURES} failed runs of \`${oneLine}\` in ${check.dir} (last exit ${code}); ` +
-      'no longer blocking this stop. Fix the check before relying on the result.';
+      'no longer blocking this stop. Fix the check before relying on the result.'
+    ).replace(/[\r\n\v\f\u0085\u2028\u2029]+/g, ' ');
     process.stdout.write(`${JSON.stringify({ systemMessage: message })}\n`);
     if (output) process.stderr.write(`${output}\n`);
     return 0;
@@ -172,6 +206,8 @@ function main() {
     return 0;
   }
   if (!input || typeof input !== 'object') return 0;
+  // Without a session id there is no state to key on, so the gate does nothing.
+  if (typeof input.session_id !== 'string' || input.session_id === '') return 0;
   const stateFile = sessionStateFile(input.session_id);
   switch (input.hook_event_name) {
     case 'PostToolUse':
