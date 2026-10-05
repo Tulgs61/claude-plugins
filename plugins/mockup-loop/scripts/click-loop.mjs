@@ -103,12 +103,25 @@ function readRound(dir) {
   return n;
 }
 
+// Windows refuses a rename over a file another process has open (a reader, a virus scanner) with
+// EPERM, EACCES or EBUSY for a moment; retry briefly before giving up.
+function renameWithRetry(from, to) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return fs.renameSync(from, to);
+    } catch (e) {
+      if (process.platform !== 'win32' || attempt >= 20 || !['EPERM', 'EACCES', 'EBUSY'].includes(e.code)) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+}
+
 // Temp file (a dotfile, never served) + rename: readers see the old or the new content, never a partial one.
 function writeAtomic(dir, name, text) {
   const tmp = path.join(dir, `.${name}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`);
   try {
     fs.writeFileSync(tmp, text);
-    fs.renameSync(tmp, path.join(dir, name));
+    renameWithRetry(tmp, path.join(dir, name));
   } catch (e) {
     fs.rmSync(tmp, { force: true });
     throw e;
