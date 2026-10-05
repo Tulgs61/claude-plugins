@@ -329,3 +329,10 @@ These amendments take precedence over the sections above where they differ.
    sets `acceptance_met` to false.
 3. **Verify result only with evidence.** The reviewer relies on the `verify.cmd` result only when the
    prompt includes its output tail; without it, verify is unconfirmed as well.
+
+## Amendments (rev 8)
+
+1. **Stored topic is untrusted.** Before tasks-plan uses a stored `topic` in any command, it checks it
+   against `^[a-z0-9][a-z0-9-]*$`. A missing or non-matching stored topic is never put into a command;
+   the "no `task/<stored topic>/` branch exists" condition then counts as met, because the helper
+   never creates branches for such a ledger.
