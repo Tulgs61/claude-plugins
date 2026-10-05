@@ -21,7 +21,8 @@ These hold in every mode below.
   list. `takeover` is passed only after the user confirms the run holding the lock is dead.
 - **Local state stays put.** Never switch the branch of the main checkout. Never edit a ledger file
   while its run is live; a run is live while the ledger's `.lock` file exists with an `at` less than
-  six hours old. Reading the ledger is always fine.
+  six hours old and the user has not confirmed that its run is dead. Reading the ledger is always
+  fine.
 
 ## Paths
 
@@ -67,25 +68,43 @@ Joins a live run without touching its ledger.
    `dependsOn`, `proof`, `budget` and `constraints` when you can work them out the way `tasks-plan`
    would (an implementer only starts when proof and budget are present). Leave out `id`; the
    helper assigns one.
-2. Append it as a single line to the ledger's inbox, `<ledger without .json>.inbox.jsonl`, for
-   example with `printf '%s\n' '<json>' >> "<inbox>"`. Never rewrite existing lines.
-3. Tell the user the live run picks it up at its next check for new tasks. If no run is live, it
+2. Write that object, on a single line followed by one newline, to a new scratch file with the
+   Write tool (for example `<root>/.claude/runs/.add-<random>.jsonl`). The JSON never goes into a
+   shell string: no `echo`, `printf`, heredoc or `node -e` carrying it.
+3. Append the scratch file to the ledger's inbox, `<ledger without .json>.inbox.jsonl`, with
+   `cat "<scratch>" >> "<inbox>"`, then delete the scratch file with `rm "<scratch>"`. Never rewrite
+   existing inbox lines.
+4. Tell the user the live run picks it up at its next check for new tasks. If no run is live, it
    is picked up when the run is resumed.
+
+## Live lock
+
+Resume and Retry first read the ledger's `.lock` file (`<ledger without .json>.lock`, a JSON object
+with `runId` and `at` in epoch milliseconds). When it is fresh (`at` less than six hours ago):
+
+1. Show the user the lock's run id and its age (now minus `at`, in minutes or hours).
+2. Ask whether that run is dead, and stop until they answer. Offer `status` meanwhile.
+3. Only on a clear yes continue, and start the engine with `"takeover": true`. On anything else,
+   change nothing and stop.
+
+A stale or missing lock needs no question and no `takeover`.
 
 ## Resume
 
-1. Read the ledger. If its run is live, say so and stop; offer `status` instead.
-2. Start the workflow as under "Starting the engine" with a new run id. If the user asked for their
-   own agents for this run, pass those agent arguments again; they are not stored in the ledger.
+1. Read the ledger and handle a fresh lock as under "Live lock".
+2. Start the workflow as under "Starting the engine" with a new run id, adding `takeover` only when
+   the user confirmed under "Live lock" that the other run is dead. If the user asked for their own
+   agents for this run, pass those agent arguments again; they are not stored in the ledger.
 3. Report.
 
 ## Retry
 
-1. Read the ledger. The task must exist and be `blocked`, and the run must not be live; otherwise
-   say why and stop.
-2. Put it back in the queue through the helper:
+1. Read the ledger. The task must exist and be `blocked`; otherwise say why and stop.
+2. Handle a fresh lock as under "Live lock". Nothing below happens until the user has confirmed
+   that the locked run is dead.
+3. Put the task back in the queue through the helper:
    `node "<helper>" status "<ledger>" <Tn> todo "retry requested by the user"`.
-3. Continue as in Resume.
+4. Continue as in Resume from step 2, with `takeover` if it was confirmed in step 2.
 
 ## Status
 
@@ -109,9 +128,9 @@ plugin directory, start it by its name `tasks-ledger:tasks-engine` instead. Its 
   `run-20261004-153012-k3x9`.
 - Only when the user asks for their own agents, add `implementerAgent` and/or `reviewerAgent`
   with the agent type they named (letters, digits, `_`, `-` and `:` only).
-- If the result has `locked: true`, another run holds the ledger. Show its error and ask the user
-  whether that run is dead. Only on a clear yes start again with `"takeover": true` added to the
-  args.
+- If the result has `locked: true`, another run holds the ledger. Show its error, which names the
+  lock's run id and age, and ask the user whether that run is dead. Only on a clear yes start again
+  with `"takeover": true` added to the args.
 
 ## Reporting
 
@@ -126,7 +145,21 @@ When the workflow returns, read the ledger once more and tell the user:
 ## Cleanup
 
 Once a run's work has landed (its PRs merged, or the user took over the integration branch), offer
-to remove what the run left behind. List every item first: the worktrees under
-`<root>/.claude/worktrees/<topic>-*` and the local `task/<topic>/*` branches. Only after the user
-agrees to that list remove them with `git -C <root> worktree remove <path>` and
-`git -C <root> branch -D <branch>`. Remote branches and PRs are left alone.
+to remove what the run left behind.
+
+1. **Collect.** The worktrees under `<root>/.claude/worktrees/<topic>-*` and the local
+   `task/<topic>/*` branches.
+2. **Leave a taken-over integration branch alone.** When the user took over the integration branch
+   `task/<topic>/integration` into the project's own flow, it and its worktree
+   `<root>/.claude/worktrees/<topic>-integration` are not cleanup items. Ask when you cannot tell.
+3. **Confirm each merge.** A task branch counts as merged only when its PR is merged
+   (`gh pr view <pr> --json state` shows `MERGED`) or `git -C <root> branch --merged <baseBranch>`
+   lists it. A `task/<topic>/<Tn>-base` branch counts as merged once task `<Tn>` does. Anything
+   unconfirmed stays and is named in your report.
+4. **List and ask.** Show every item you would remove, marked as merged-confirmed. Remove nothing
+   before the user agrees to that list.
+5. **Remove.** Worktrees with `git -C <root> worktree remove <path>`. Branches with
+   `git -C <root> branch -d <branch>`; use `git -C <root> branch -D <branch>` only for a branch whose
+   merge was confirmed in step 3 (a squash merge, for example, leaves `-d` refusing).
+
+Remote branches and PRs are left alone.
