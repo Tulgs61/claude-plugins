@@ -32,15 +32,16 @@ or setting the marker. Read and write files by their absolute paths instead.
    - keep secrets and customer data out, and leave the file uncommitted.
 3. **Set the marker.** Run the bare command in the shell's current directory, which is the session's
    project directory. Do not `cd` anywhere first, not to the root from step 2 and not to any other
-   path printed by git or another tool: the script must see the directory spelled the way the
-   session sees it, symlinks included, or the hook will not find the marker.
+   path printed by git or another tool: the script must work from the session's own directory, or
+   it may arm the marker for a different repository.
 
    ```bash
    node "${CLAUDE_PLUGIN_ROOT}/scripts/fresh-marker.js"
    ```
 
-   The script arms the marker for the repository root containing its working directory. On success it
-   prints `fresh marker armed for <root> (<marker path>)`.
+   The script arms the marker for the repository root containing its working directory, keyed to that
+   root with symlinks resolved, so the hook finds it whichever spelling the cleared session uses. On
+   success it prints `fresh marker armed for <root> (<marker path>)`.
 
    **Check that the marker belongs to this handover.** The root in the success line may be spelled
    differently from the root in step 2 (a symlink, other letter case, other separators), so never

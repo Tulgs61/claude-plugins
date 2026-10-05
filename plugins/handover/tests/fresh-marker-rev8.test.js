@@ -87,12 +87,12 @@ test('amendment 4: armed from the symlinked path, a clear through the resolved c
   assert.match(ctx, /RUN-THE-NEXT-STEP/);
 });
 
-test('amendment 4: armed from the symlinked path with a shell PWD, a clear through the resolved cwd resumes',
-  { ...SH, todo: 'the script keys the marker to the PWD spelling, which the hook cannot derive from a resolved cwd' }, () => {
-    const { real, link, env } = sandbox();
-    armInShell(env, link);
-    assert.match(hook(env, real), /Continuing from /);
-  });
+// Was a todo until spec rev 9, amendment 1: the script now arms under the resolved root.
+test('amendment 4: armed from the symlinked path with a shell PWD, a clear through the resolved cwd resumes', SH, () => {
+  const { real, link, env } = sandbox();
+  armInShell(env, link);
+  assert.match(hook(env, real), /Continuing from /);
+});
 
 test('amendment 4: a marker for another repository never resumes, under any spelling', SH, () => {
   const { repo, real, link, env } = sandbox();
@@ -127,7 +127,8 @@ test('amendment 1: a fresh marker under the lexical root wins first', SH, () => 
   const resolved = writeMarker(tmp, real, Date.now());
   assert.match(hook(env, link), /Continuing from /);
   assert.ok(!fs.existsSync(lexical), 'the lexical marker is consumed');
-  assert.ok(fs.existsSync(resolved), 'the resolved marker is not needed');
+  // Spec rev 9, amendment 2: honouring one spelling also removes the marker under the other.
+  assert.ok(!fs.existsSync(resolved), 'the resolved marker is removed too');
 });
 
 test('amendment 1: an untrusted marker under the resolved root is not honoured', { skip: (process.platform === 'win32') && 'POSIX modes' }, () => {
