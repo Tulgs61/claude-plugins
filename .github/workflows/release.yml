@@ -38,6 +38,7 @@ jobs:
 
           # One "<name> <version>" line per marketplace entry. Fails when an entry has an unsafe name,
           # a version that is not strict semver, or a plugin.json version that differs from the entry.
+          # shellcheck disable=SC2016 # the Node program is single-quoted on purpose
           entries="$(node --input-type=module -e '
             import { readFileSync } from "node:fs";
             import path from "node:path";
