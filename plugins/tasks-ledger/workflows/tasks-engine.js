@@ -137,14 +137,13 @@ function ops(subcommand, ...rest) {
 // Conservative overlap test for `files` globs. Each pattern is reduced to its literal prefix (the
 // segments before the first one holding a glob character); two patterns are disjoint only when
 // those prefixes disagree at a position where both have a segment. A false "overlap" is
-// acceptable, a false "disjoint" is not.
+// acceptable, a false "disjoint" is not. A pattern holding `..` anywhere overlaps everything.
 function globLiteralPrefix(pattern) {
-  const segments = String(pattern == null ? '' : pattern)
+  const text = String(pattern == null ? '' : pattern)
     .toLowerCase()
-    .replace(/\\/g, '/')
-    .split('/')
-    .filter(s => s !== '' && s !== '.');
-  if (segments.includes('..')) return null;
+    .replace(/\\/g, '/');
+  if (text.includes('..')) return null;
+  const segments = text.split('/').filter(s => s !== '' && s !== '.');
   const prefix = [];
   for (const s of segments) {
     if (/[*?[\]{}()]/.test(s) || s.startsWith('!')) break;

@@ -15,6 +15,7 @@ const TASK_KEYS = [
 const LISTING_LISTS = ['constraints', 'dependsOn', 'files'];
 const LISTING_SCALARS = ['acceptance', 'base', 'branch', 'budget', 'id', 'pr', 'proof', 'status', 'title', 'worktree'];
 const ID_RE = /^T[0-9]+$/;
+const INBOX_ID_RE = /^T[0-9]{1,9}$/;
 const TOPIC_RE = /^[a-z0-9][a-z0-9-]*$/;
 const RUN_ID_RE = /^[A-Za-z0-9-]{4,64}$/;
 const SETTABLE = ['blocked', 'done', 'in_progress', 'todo', 'verified'];
@@ -29,14 +30,13 @@ const PERMANENT_BRANCHES = ['main', 'master', 'develop', 'trunk'];
 // Conservative overlap test for `files` globs. Each pattern is reduced to its literal prefix (the
 // segments before the first one holding a glob character); two patterns are disjoint only when
 // those prefixes disagree at a position where both have a segment. A false "overlap" is
-// acceptable, a false "disjoint" is not.
+// acceptable, a false "disjoint" is not. A pattern holding `..` anywhere overlaps everything.
 function globLiteralPrefix(pattern) {
-  const segments = String(pattern == null ? '' : pattern)
+  const text = String(pattern == null ? '' : pattern)
     .toLowerCase()
-    .replace(/\\/g, '/')
-    .split('/')
-    .filter(s => s !== '' && s !== '.');
-  if (segments.includes('..')) return null;
+    .replace(/\\/g, '/');
+  if (text.includes('..')) return null;
+  const segments = text.split('/').filter(s => s !== '' && s !== '.');
   const prefix = [];
   for (const s of segments) {
     if (/[*?[\]{}()]/.test(s) || s.startsWith('!')) break;
@@ -231,17 +231,100 @@ function baseRefOf(ctx, t) {
 
 // ---- lock --------------------------------------------------------------------------------------
 
-function readLock(ctx) {
+function readLockText(ctx) {
   try {
-    const lock = JSON.parse(fs.readFileSync(ctx.lockFile, 'utf8'));
+    return fs.readFileSync(ctx.lockFile, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function parseLock(text) {
+  try {
+    const lock = JSON.parse(text);
     return lock && typeof lock === 'object' ? lock : null;
   } catch {
     return null;
   }
 }
 
-function writeLock(ctx, runId) {
-  writeAtomic(ctx.lockFile, JSON.stringify({ runId, at: Date.now() }) + '\n');
+const readLock = ctx => {
+  const text = readLockText(ctx);
+  return text === null ? null : parseLock(text);
+};
+
+const isLiveForeign = (lock, runId) => lock && lock.runId !== runId && Date.now() - Number(lock.at) < LOCK_TTL_MS;
+
+const lockedFailure = held => {
+  const age = Math.round((Date.now() - Number(held.at)) / 60000);
+  fail(`another run (${held.runId}, heartbeat ${age} min ago) holds this ledger; pass takeover to replace it`, { locked: true });
+};
+
+const errCode = e => e && e.code;
+
+// Takes the lock atomically. A missing lock is created with link(2), which fails when another
+// call created it first; an existing lock is first renamed aside (only one caller can do that) and
+// checked to be the lock that was judged replaceable. Losers re-read the lock and are refused when
+// it now belongs to a live foreign run. Returns { previous, written }: the lock text before the
+// call (null when there was none) and the text this call wrote.
+function acquireLock(ctx, runId, takeover) {
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const written = JSON.stringify({ runId, at: Date.now() }) + '\n';
+  const tmp = `${ctx.lockFile}.new-${token}`;
+  fs.writeFileSync(tmp, written);
+  try {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const previous = readLockText(ctx);
+      const held = previous === null ? null : parseLock(previous);
+      if (isLiveForeign(held, runId) && !takeover) lockedFailure(held);
+
+      if (previous === null) {
+        try {
+          fs.linkSync(tmp, ctx.lockFile);
+          return { previous: null, written };
+        } catch (e) {
+          if (errCode(e) === 'EEXIST') continue;
+          throw e;
+        }
+      }
+
+      const aside = `${ctx.lockFile}.old-${token}`;
+      try {
+        fs.renameSync(ctx.lockFile, aside);
+      } catch (e) {
+        if (errCode(e) === 'ENOENT') continue;
+        throw e;
+      }
+      if (fs.readFileSync(aside, 'utf8') !== previous) {
+        // The lock changed between reading and renaming it: put it back and judge it again.
+        try {
+          fs.linkSync(aside, ctx.lockFile);
+        } catch {}
+        fs.rmSync(aside, { force: true });
+        continue;
+      }
+      try {
+        fs.linkSync(tmp, ctx.lockFile);
+      } catch (e) {
+        fs.rmSync(aside, { force: true });
+        if (errCode(e) === 'EEXIST') continue;
+        throw e;
+      }
+      fs.rmSync(aside, { force: true });
+      return { previous, written };
+    }
+    const held = readLock(ctx);
+    fail(`another run (${(held && held.runId) || 'unknown'}) keeps changing this ledger's lock; try again`, { locked: true });
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+// Puts back the lock that was there before acquireLock, unless another call has replaced ours since.
+function restoreLock(ctx, { previous, written }) {
+  if (readLockText(ctx) !== written) return;
+  if (previous === null) fs.rmSync(ctx.lockFile, { force: true });
+  else writeAtomic(ctx.lockFile, previous);
 }
 
 function removeLock(ctx) {
@@ -256,8 +339,13 @@ function ingestInbox(ctx) {
   if (!fs.existsSync(ctx.inboxFile)) return { added: [], consume: () => {} };
   const text = fs.readFileSync(ctx.inboxFile, 'utf8');
   const taken = new Set(ctx.L.tasks.map(t => t.id));
-  let next = 0;
-  for (const id of taken) next = Math.max(next, Number(id.slice(1)));
+  // BigInt keeps every generated id of the form T<n> and every increment effective, however long
+  // the ledger's ids are, so the loop below always terminates.
+  let next = 0n;
+  for (const id of taken) {
+    const n = BigInt(id.slice(1));
+    if (n > next) next = n;
+  }
   const added = [];
 
   for (const line of text.split(/\r?\n/)) {
@@ -273,7 +361,7 @@ function ingestInbox(ctx) {
 
     const stored = {};
     for (const k of TASK_KEYS) if (Object.prototype.hasOwnProperty.call(o, k)) stored[k] = o[k];
-    let id = typeof o.id === 'string' && ID_RE.test(o.id) && !taken.has(o.id) ? o.id : null;
+    let id = typeof o.id === 'string' && INBOX_ID_RE.test(o.id) && !taken.has(o.id) ? o.id : null;
     if (!id) {
       do next++;
       while (taken.has(`T${next}`));
@@ -365,12 +453,7 @@ function overlapWarnings(L) {
 function opPrepare(ctx, [runId, takeover]) {
   if (typeof runId !== 'string' || !RUN_ID_RE.test(runId)) fail(`bad runId ${JSON.stringify(runId)}: must match ${RUN_ID_RE}`);
 
-  const held = readLock(ctx);
-  if (held && held.runId !== runId && Date.now() - Number(held.at) < LOCK_TTL_MS && takeover !== 'takeover') {
-    const age = Math.round((Date.now() - Number(held.at)) / 60000);
-    fail(`another run (${held.runId}, heartbeat ${age} min ago) holds this ledger; pass takeover to replace it`, { locked: true });
-  }
-  writeLock(ctx, runId);
+  const lock = acquireLock(ctx, runId, takeover === 'takeover');
 
   try {
     const { root, L } = ctx;
@@ -420,7 +503,7 @@ function opPrepare(ctx, [runId, takeover]) {
 
     return { added, integration, prs: L.prs === true, root, start, tasks: listing(L), warnings };
   } catch (e) {
-    removeLock(ctx);
+    restoreLock(ctx, lock);
     throw e;
   }
 }
@@ -497,6 +580,19 @@ function readVerifyCmd(dir) {
   }
 }
 
+// Refuses a task whose branch changes .claude/verify.cmd since it left its base: a task must not
+// rewrite the check that judges it.
+function refuseVerifyCmdChange(ctx, t) {
+  const branch = taskBranch(ctx, t.id);
+  const baseRef = baseRefOf(ctx, t);
+  const d = git(ctx.root, 'diff', '--quiet', `${baseRef}...refs/heads/${branch}`, '--', '.claude/verify.cmd');
+  if (d.status === 0) return;
+  if (d.status === 1) {
+    fail(`${t.id}: ${branch} modifies .claude/verify.cmd compared with ${baseRef}; change verify.cmd outside a run, then retry the task`);
+  }
+  fail(`${t.id}: cannot compare .claude/verify.cmd of ${branch} with ${baseRef}: ${(d.stderr || d.stdout).trim()}`);
+}
+
 function opVerify(ctx, [id]) {
   const t = findTask(ctx, id);
   const worktree = taskWorktree(ctx, t);
@@ -511,6 +607,7 @@ function opVerify(ctx, [id]) {
   if (st.status !== 0) fail(`git status failed in ${worktree}: ${st.stderr.trim()}`);
   const dirty = st.stdout.split('\n').filter(Boolean);
   if (dirty.length) fail(`${id}: uncommitted changes in ${worktree}`, { dirty });
+  refuseVerifyCmdChange(ctx, t);
 
   const command = readVerifyCmd(worktree);
   if (!command) fail(`${id}: .claude/verify.cmd is missing or empty in ${worktree}`);
@@ -532,6 +629,7 @@ function opMerge(ctx, [id]) {
 
   const branch = taskBranch(ctx, id);
   if (!hasBranch(ctx.root, branch)) fail(`${id}: branch ${branch} does not exist`);
+  refuseVerifyCmdChange(ctx, t);
 
   if (git(integration, 'merge-base', '--is-ancestor', branch, 'HEAD').status === 0) {
     const sha = gitOk(integration, 'rev-parse', '--short', 'HEAD');
@@ -597,6 +695,16 @@ function checkPushable(ctx, branch) {
   if (!branch.startsWith(`task/${ctx.L.topic}/`)) refuse(`not under task/${ctx.L.topic}/`);
 }
 
+// A request may target only baseBranch or a well-formed branch under task/<topic>/.
+function checkTarget(ctx, target) {
+  if (target === ctx.L.baseBranch) return;
+  const refuse = why => fail(`refusing to push a request targeting ${JSON.stringify(target)}: ${why}`);
+  if (typeof target !== 'string' || target === '') refuse('not a branch name');
+  if (/[\s:]/.test(target) || target.startsWith('-')) refuse('not a well-formed branch name');
+  if (git(ctx.root, 'check-ref-format', '--branch', target).status !== 0) refuse('not a well-formed branch name');
+  if (!target.startsWith(`task/${ctx.L.topic}/`)) refuse(`neither ${ctx.L.baseBranch} nor under task/${ctx.L.topic}/`);
+}
+
 // Merged tasks with prerequisites before dependants, otherwise in ledger order.
 function mergedInOrder(L) {
   const byId = new Map(L.tasks.map(t => [t.id, t]));
@@ -630,6 +738,7 @@ function opPrs(ctx) {
     const target = t.base == null ? baseOf(ctx, t) : t.base;
     const push = [branch];
     checkPushable(ctx, branch);
+    checkTarget(ctx, target);
     if (target === combinedBase(ctx, t.id)) {
       checkPushable(ctx, target);
       push.push(target);
