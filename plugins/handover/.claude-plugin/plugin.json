@@ -1,6 +1,6 @@
 {
   "name": "handover",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Session continuity for Claude Code: /handover writes one HANDOVER.md per repo, /pickup continues from it with a drift check, /fresh clears context and carries the next prompt across /clear. A SessionStart hook re-injects the handover after /fresh and reminds Claude to re-read the active plan and task ledger after compaction or resume.",
   "author": {
     "name": "Tulgs61"

@@ -9,6 +9,24 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ## handover
 
+### [0.1.1] - 2026-10-05
+
+#### Fixed
+
+- `/fresh` arms exactly one marker, under the repository root with symlinks resolved and in the file
+  system's canonical spelling (on macOS this also fixes letter case). A `/clear` through a symlinked or
+  differently cased path now resumes, and a marker can never be used twice, whatever the order of
+  arming and clearing.
+- The marker holds only `createdAt`. The hook no longer reads a list of root spellings from it and
+  works out both candidate paths itself. A marker with more than one hard link is not trusted.
+- The handover injected after `/fresh` is never cut inside a fenced code block or in the middle of a
+  surrogate pair. The cut uses the same fence rules as heading detection.
+
+#### Changed
+
+- Tests that could not fail now pin real behaviour: which guard handles a closed or broken stdout,
+  fence edge cases, the finished-plan modification-time case and a marker owned by another user.
+
 ### [0.1.0] - 2026-10-05
 
 #### Added

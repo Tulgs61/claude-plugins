@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const { markerPath } = require('../scripts/fresh-marker.js');
+const { markerPath, resolvedRoot } = require('../scripts/fresh-marker.js');
 
 const PLUGIN = path.resolve(__dirname, '..');
 const ARM = path.join(PLUGIN, 'scripts', 'fresh-marker.js');
@@ -34,7 +34,7 @@ function sandbox(name = 'repo') {
   fs.writeFileSync(path.join(repo, 'HANDOVER.md'), HANDOVER);
   const env = { ...process.env, HOME: home, USERPROFILE: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp };
   delete env.PWD;
-  return { dir, repo, real: fs.realpathSync(repo), link, tmp, env };
+  return { dir, repo, real: resolvedRoot(repo), link, tmp, env };
 }
 
 // Arms the marker with the bare command from `dir`, PWD set as a shell sets it.

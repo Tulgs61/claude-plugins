@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const { markerPath, markerTrusted } = require('../scripts/fresh-marker.js');
+const { markerPath, markerTrusted, resolvedRoot } = require('../scripts/fresh-marker.js');
 
 const PLUGIN = path.resolve(__dirname, '..');
 const ARM = path.join(PLUGIN, 'scripts', 'fresh-marker.js');
@@ -35,7 +35,7 @@ test('amendment 1: without a directory argument the marker is armed for the cwd 
   const r = spawnSync(process.execPath, [ARM], { cwd: nested, env, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   // process.cwd() resolves symlinks, so compare against the real repository path.
-  const marker = path.join(tmp, path.basename(markerPath(fs.realpathSync(repo))));
+  const marker = path.join(tmp, path.basename(markerPath(resolvedRoot(repo))));
   assert.ok(fs.existsSync(marker), `marker armed at ${marker}`);
 });
 
@@ -45,8 +45,10 @@ test('amendment 1: a $PWD naming the cwd keeps its lexical spelling (POSIX)', { 
   fs.symlinkSync(repo, link);
   const r = spawnSync(process.execPath, [ARM], { cwd: link, env: { ...env, PWD: link }, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
-  // Same key the hook computes from findRoot(<cwd as given>), which never resolves symlinks.
-  assert.ok(fs.existsSync(path.join(tmp, path.basename(markerPath(link)))), fs.readdirSync(tmp).join(', '));
+  // Spec rev 10, amendment 6: the success line keeps the shell's spelling, and the single marker sits
+  // under the resolved root, where the hook's second lookup finds it.
+  assert.match(r.stdout, new RegExp(`^fresh marker armed for ${link.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(`));
+  assert.deepEqual(fs.readdirSync(tmp), [path.basename(markerPath(resolvedRoot(repo)))]);
 });
 
 test('amendment 1: a $PWD naming another directory is ignored', () => {
@@ -54,7 +56,7 @@ test('amendment 1: a $PWD naming another directory is ignored', () => {
   const other = sandbox().repo;
   const r = spawnSync(process.execPath, [ARM], { cwd: repo, env: { ...env, PWD: other }, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
-  assert.ok(fs.existsSync(path.join(tmp, path.basename(markerPath(fs.realpathSync(repo))))));
+  assert.ok(fs.existsSync(path.join(tmp, path.basename(markerPath(resolvedRoot(repo))))));
   assert.ok(!fs.existsSync(path.join(tmp, path.basename(markerPath(other)))));
 });
 

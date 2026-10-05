@@ -4,7 +4,7 @@
 //
 // - clear + trusted, fresh /fresh marker + HANDOVER.md: inject the handover essentials once. The
 //   marker is looked up under the lexical root and, failing that, under the root with symlinks
-//   resolved. Honouring it uses up the marker under every spelling of the root.
+//   resolved. Honouring it also removes a trusted marker under the other of these two spellings.
 // - compact / resume: remind to re-read the active plan and task ledger.
 // - every source but compact (and not after a fresh resume): hint at /pickup when HANDOVER.md exists.
 //
@@ -110,31 +110,89 @@ function consumeMarker(root) {
   }
 }
 
-// Preamble plus the kept `## ` sections, capped at MAX_HANDOVER_CHARS. A `## ` line inside a fenced
-// code block is content, not a heading.
-function reduceHandover(text) {
-  const lines = text.replace(/\r\n/g, '\n').split('\n');
-  const out = [];
-  let keep = true; // preamble
+// Fenced code blocks among `lines`, as [first, last] line indexes (inclusive). A fence opens with three
+// or more backticks or tildes after at most three spaces (a backtick fence's info string may not
+// contain a backtick) and closes with a bare run of the same character at least as long. A fence that
+// is never closed runs to the last line.
+function fencedBlocks(lines) {
+  const blocks = [];
   let fence = null; // opening fence run (e.g. "```" or "~~~~") while inside a code block
-  for (const line of lines) {
+  let start = -1;
+  lines.forEach((line, i) => {
     const f = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
     if (fence) {
-      if (f && f[1][0] === fence[0] && f[1].length >= fence.length && f[2].trim() === '') fence = null;
+      if (f && f[1][0] === fence[0] && f[1].length >= fence.length && f[2].trim() === '') {
+        blocks.push([start, i]);
+        fence = null;
+      }
     } else if (f && !(f[1][0] === '`' && f[2].includes('`'))) {
       fence = f[1];
-    } else if (/^## /.test(line)) {
+      start = i;
+    }
+  });
+  if (fence) blocks.push([start, lines.length - 1]);
+  return blocks;
+}
+
+// Joins `lines` and cuts the text at or before MAX_HANDOVER_CHARS, never inside a surrogate pair or one
+// of the fenced code `blocks` (the cut then moves to just before the fence's opening line), and adds
+// the note on its own line.
+function truncate(lines, blocks) {
+  const text = lines.join('\n');
+  if (text.length <= MAX_HANDOVER_CHARS) return text;
+  let cut = MAX_HANDOVER_CHARS;
+  const c = text.charCodeAt(cut - 1);
+  if (c >= 0xd800 && c <= 0xdbff) cut--;
+  const offsets = [];
+  let off = 0;
+  for (const line of lines) {
+    offsets.push(off);
+    off += line.length + 1;
+  }
+  for (const [first, last] of blocks) {
+    const begin = offsets[first];
+    const end = offsets[last] + lines[last].length;
+    if (begin < cut && cut < end) {
+      cut = begin;
+      break;
+    }
+  }
+  return text.slice(0, cut).trimEnd() +
+    `\n\n[Truncated at ${MAX_HANDOVER_CHARS} characters; read the full file for the rest.]`;
+}
+
+// Preamble plus the kept `## ` sections, capped at MAX_HANDOVER_CHARS. Fenced code blocks are found
+// once, before any trimming, and serve both heading detection (a `## ` line inside one is content, not
+// a heading) and the cut. Trimming works on whole lines, so it never re-indents one into a fence.
+function reduceHandover(text) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const blockOf = new Array(lines.length).fill(-1);
+  fencedBlocks(lines).forEach(([first, last], b) => {
+    for (let i = first; i <= last; i++) blockOf[i] = b;
+  });
+  const out = []; // [line, block index or -1]
+  let keep = true; // preamble
+  lines.forEach((line, i) => {
+    if (blockOf[i] === -1 && /^## /.test(line)) {
       const title = line.slice(3).trim();
       keep = KEPT_SECTIONS.some(s => title.startsWith(s));
     }
-    if (keep) out.push(line);
-  }
-  let reduced = out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
-  if (reduced.length > MAX_HANDOVER_CHARS) {
-    reduced = reduced.slice(0, MAX_HANDOVER_CHARS).trimEnd() +
-      `\n\n[Truncated at ${MAX_HANDOVER_CHARS} characters; read the full file for the rest.]`;
-  }
-  return reduced;
+    // Runs of empty lines collapse to one.
+    if (keep && !(line === '' && out.length && out[out.length - 1][0] === '')) out.push([line, blockOf[i]]);
+  });
+  // Blank lines at either end go, and so does trailing whitespace on the last line.
+  const blank = ([line]) => line.trim() === '';
+  while (out.length && blank(out[0])) out.shift();
+  while (out.length && blank(out[out.length - 1])) out.pop();
+  if (out.length) out[out.length - 1][0] = out[out.length - 1][0].trimEnd();
+
+  const kept = new Map(); // block index -> [first, last] in `out`
+  out.forEach(([, b], i) => {
+    if (b === -1) return;
+    if (kept.has(b)) kept.get(b)[1] = i;
+    else kept.set(b, [i, i]);
+  });
+  return truncate(out.map(([line]) => line), [...kept.values()]);
 }
 
 function frontMatterStatus(file) {
@@ -222,52 +280,57 @@ function freshContext(handover, text) {
   ].join('\n');
 }
 
-// The root as found lexically, then the same root with symlinks resolved when that is spelled
-// differently, so a marker armed under either spelling is found.
+// The root as found lexically, then the same root with symlinks resolved (in the operating system's
+// canonical spelling) when that is spelled differently, so a marker armed under either is found.
 function rootSpellings(root) {
   const roots = [root];
-  try {
-    const real = fs.realpathSync(root);
-    if (fm.markerPath(real) !== fm.markerPath(root)) roots.push(real);
-  } catch {
-    // no resolved spelling
-  }
+  const real = fm.resolvedRoot(root);
+  if (fm.markerPath(real) !== fm.markerPath(root)) roots.push(real);
   return roots;
 }
 
-function sameDir(a, b) {
+// Removes the marker of `root` when it passes the trust check, without following symlinks and only
+// if the path still names the file that was checked.
+function removeTrustedMarker(root) {
+  const p = fm.markerPath(root);
+  const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+  if (typeof O_NOFOLLOW !== 'number') {
+    try {
+      const st = fs.lstatSync(p);
+      if (fm.markerTrusted(st)) fs.unlinkSync(p);
+    } catch {
+      // ignore
+    }
+    return;
+  }
+  let flags = O_RDONLY | O_NOFOLLOW;
+  if (typeof O_NONBLOCK === 'number') flags |= O_NONBLOCK;
+  let stat;
   try {
-    const x = fs.statSync(a);
-    const y = fs.statSync(b);
-    return x.isDirectory() && x.dev === y.dev && x.ino === y.ino;
+    const fd = fs.openSync(p, flags);
+    try {
+      stat = fs.fstatSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    if (!fm.markerTrusted(stat)) return;
+    const now = fs.lstatSync(p);
+    if (now.isFile() && now.ino === stat.ino && now.dev === stat.dev) fs.unlinkSync(p);
   } catch {
-    return false;
+    // ignore
   }
 }
 
-// The spellings a marker lists in `roots` that name the same directory as `root`.
-function markerRoots(marker, root) {
-  if (!Array.isArray(marker.roots)) return [];
-  return marker.roots
-    .slice(0, 8)
-    .filter(r => typeof r === 'string' && path.isAbsolute(r) && sameDir(r, root));
-}
-
-// The first trusted, fresh marker among the root's spellings, or null. The winner is consumed, and so
-// is a marker of the same root under any other spelling (the resolved one, or one the marker lists
-// that names the same directory), with the same ownership and same-file checks, so it works only once
-// whatever the spelling.
+// The first trusted, fresh marker among the root's two candidate spellings, or null. The winner is
+// consumed, and the marker at the other candidate path is removed too when it passes the same trust
+// check, so it works only once whatever the spelling. A `roots` key in the marker is ignored.
 function findFreshMarker(root) {
   const spellings = rootSpellings(root);
   for (const r of spellings) {
     const marker = consumeMarker(r);
     if (!marker || !fm.markerFresh(marker.createdAt)) continue;
-    const used = new Set([fm.markerPath(r)]);
-    for (const other of [...spellings, ...markerRoots(marker, root)]) {
-      const p = fm.markerPath(other);
-      if (used.has(p)) continue;
-      used.add(p);
-      consumeMarker(other);
+    for (const other of spellings) {
+      if (other !== r) removeTrustedMarker(other);
     }
     return marker;
   }

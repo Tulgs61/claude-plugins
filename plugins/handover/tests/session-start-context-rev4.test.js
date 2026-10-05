@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn, spawnSync } = require('node:child_process');
+const { spawnSync } = require('node:child_process');
 
 const PLUGIN = path.resolve(__dirname, '..');
 const HOOK = path.join(PLUGIN, 'hooks', 'session-start-context.js');
@@ -52,28 +52,8 @@ test('amendment 2: a hook that cannot load its module exits 0 silently', () => {
   assert.equal(r.stderr, '');
 });
 
-test('amendment 2: a closed stdout pipe gives exit 0 and no stderr', async () => {
-  const { repo, env } = sandbox();
-  fs.writeFileSync(path.join(repo, 'HANDOVER.md'), '# H\n');
-  const child = spawn(process.execPath, [HOOK], { env, stdio: ['pipe', 'pipe', 'pipe'] });
-  child.stdout.destroy(); // reader gone before the hook writes: EPIPE
-  let stderr = '';
-  child.stderr.on('data', d => { stderr += d; });
-  child.stdin.end(JSON.stringify({ source: 'startup', cwd: repo }));
-  const status = await new Promise(resolve => child.on('close', resolve));
-  assert.equal(status, 0);
-  assert.equal(stderr, '');
-});
-
-test('amendment 2: a closed stdout descriptor gives exit 0 and no stderr (POSIX)', { skip: process.platform === 'win32' && 'needs sh' }, () => {
-  const { repo, env } = sandbox();
-  fs.writeFileSync(path.join(repo, 'HANDOVER.md'), '# H\n');
-  const r = spawnSync('/bin/sh', ['-c', '"$0" "$1" >&-', process.execPath, HOOK], {
-    input: JSON.stringify({ source: 'startup', cwd: repo }), env, encoding: 'utf8', timeout: 10000,
-  });
-  assert.equal(r.status, 0);
-  assert.equal(r.stderr, '');
-});
+// The closed-stdout pipe and descriptor tests were replaced (spec rev 10, amendment 5) by tests that
+// make only one guard reachable at a time. See session-start-context-rev10.test.js.
 
 // --- Amendment 3: code fences ---
 

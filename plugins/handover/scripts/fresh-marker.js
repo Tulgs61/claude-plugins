@@ -55,9 +55,11 @@ function currentUid() {
 }
 
 // An omitted or undefined uid means the current user; only an explicit null disables the checks.
+// A marker with a second hard link is never trusted.
 function markerTrusted(stat, uid) {
   if (uid === undefined) uid = currentUid();
   if (!stat || typeof stat.isFile !== 'function' || !stat.isFile()) return false;
+  if (typeof stat.nlink === 'number' && stat.nlink !== 1) return false;
   if (uid === null) return true;
   if (stat.uid !== uid) return false;
   return (Number(stat.mode) & 0o022) === 0;
@@ -92,22 +94,24 @@ function writeMarkerFile(target, body) {
   }
 }
 
-// Arms the marker for `root`. With `aliases` (other spellings of the same root), the same marker is
-// also armed under each alias, and every copy lists all spellings in `roots`, so the hook can use up
-// all of them when it honours one. Returns the marker path for `root`.
-function armMarker(root, now = Date.now(), aliases = []) {
+// Arms the single marker for `root`. It holds only `createdAt`; the hook works out the spellings of the
+// root itself. Returns the marker path.
+function armMarker(root, now = Date.now()) {
   const target = markerPath(root);
-  const others = aliases.filter(a => markerPath(a) !== target);
-  const data = { createdAt: now };
-  if (others.length) data.roots = [root, ...others];
-  const body = JSON.stringify(data) + '\n';
-  writeMarkerFile(target, body);
-  for (const a of others) writeMarkerFile(markerPath(a), body);
+  writeMarkerFile(target, JSON.stringify({ createdAt: now }) + '\n');
   return target;
 }
 
-// The root with symlinks resolved, or the root itself when it cannot be resolved.
+// The root with symlinks resolved, in the operating system's canonical spelling (on macOS this also
+// corrects letter case); the plain resolution when that is unavailable, else the root itself.
 function resolvedRoot(root) {
+  if (typeof fs.realpathSync.native === 'function') {
+    try {
+      return fs.realpathSync.native(root);
+    } catch {
+      // fall back to the plain resolution
+    }
+  }
   try {
     return fs.realpathSync(root);
   } catch {
@@ -147,9 +151,9 @@ function main(argv) {
   }
   const root = findRoot(dir);
   try {
-    // Without an argument the marker is armed under the root with symlinks resolved, whatever
-    // spelling the working directory has; the shell's spelling gets the same marker as an alias.
-    const target = argv[0] ? armMarker(root) : armMarker(resolvedRoot(root), Date.now(), [root]);
+    // Without an argument exactly one marker is armed, under the root with symlinks resolved, whatever
+    // spelling the working directory has. The hook looks under both spellings, so it finds it either way.
+    const target = armMarker(argv[0] ? root : resolvedRoot(root));
     process.stdout.write(`fresh marker armed for ${root} (${target})\n`);
     return 0;
   } catch (err) {

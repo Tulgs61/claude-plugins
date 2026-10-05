@@ -27,7 +27,7 @@ What it adds to the session context, by source:
 
 | Source | Context injected |
 |---|---|
-| `clear`, with a trusted marker armed by `/fresh` for this repo less than 12 hours ago | The essentials of the repo root's `HANDOVER.md` (header, Next action, Threads, Open questions, Traps; capped at 4000 characters) and an instruction to verify state and carry out the next action. The marker is deleted, so this fires once. |
+| `clear`, with a trusted marker armed by `/fresh` for this repo less than 12 hours ago | The essentials of the repo root's `HANDOVER.md` (header, Next action, Threads, Open questions, Traps; capped at 4000 characters, never cut inside a code block) and an instruction to verify state and carry out the next action. The marker is deleted, so this fires once. |
 | `compact`, `resume` | "Re-read the plan ... read the task ledger ...", naming the active plan (newest `docs/plans/*.md` whose `status` is not `done`/`abandoned`, legacy fallback `.planning/*-plan.md`) and the newest `.claude/runs/*.json` ledger, when either exists. |
 | `startup`, `resume`, `clear` without a valid marker | A one-line hint to run the pickup skill when `HANDOVER.md` exists in the repo root. |
 
@@ -37,8 +37,10 @@ repository it is the `cwd` itself.
 ### The /fresh marker
 
 `scripts/fresh-marker.js` writes `claude-fresh-<hash>.json` into the OS temp directory
-(`os.tmpdir()`), where `<hash>` is derived from the normalized repo root with symlinks resolved; when
-the shell reaches the repository through a symlink, a second copy is written under that spelling too.
+(`os.tmpdir()`), where `<hash>` is derived from the normalized repo root with symlinks resolved, in
+the file system's canonical spelling (on macOS this also fixes letter case). Exactly one marker is
+written. The hook looks under both the root as the session sees it and that resolved root, so a
+`/clear` through a symlinked path finds the marker as well.
 Nothing is written into the repository. The `/fresh` skill runs it from the installed plugin via `${CLAUDE_PLUGIN_ROOT}`.
 
 The temp directory can be shared with other local users (for example `/tmp` on a multi-user Linux
@@ -49,15 +51,15 @@ machine), so the marker is treated as untrusted input:
   followed, so its target is not written. If another user's file occupies the path and cannot be
   replaced, arming fails with a message instead of silently doing nothing.
 - **Reading.** The hook opens the marker without following symlinks and honours it only when it is a
-  regular file and, on POSIX, owned by the current user and not group- or world-writable. Its
+  regular file with a single hard link and, on POSIX, owned by the current user and not group- or
+  world-writable. Its
   `createdAt` must lie in the past and be less than 12 hours old; a marker dated in the future is
   ignored. On Windows there is no ownership or mode check (the temp directory is per user there).
-- **Content.** The marker supplies `createdAt` and, when armed without an argument, a `roots` list of
-  the spellings it was written under. The hook uses that list only to delete the other copies, and only
-  those whose path names the same directory as the honoured root. It always injects
-  `<repo root>/HANDOVER.md` and ignores any file path named in the marker (older markers had a
-  `handover` field).
-- **Single use.** Once a marker is honoured, its copies under every spelling of the root are deleted.
+- **Content.** The marker supplies only `createdAt`. The hook always injects `<repo root>/HANDOVER.md`
+  and ignores any other key, including file paths (older markers had a `handover` field) and the
+  `roots` list that 0.1.0 wrote.
+- **Single use.** Once a marker is honoured it is deleted, together with a trusted marker under the
+  other spelling of the root, if one exists.
 - **Cleanup.** A marker owned by the current user is deleted once read, whether or not it was honoured.
   A marker owned by someone else is ignored and left in place.
 
