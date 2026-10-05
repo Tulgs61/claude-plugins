@@ -349,6 +349,8 @@ async function verify(t) {
 
 async function driveTask(t) {
   if (!TASK_ID.test(t.id)) return finishTask(t, 'blocked', 'task id is not of the form T<n>');
+  // A `start` from prepare is checked for every task, whether or not it becomes the diff base.
+  if (prepared.start != null && !isGitRef(prepared.start)) return block(t, 'prepare returned an invalid start ref');
   if (t.status === 'verified') return merge(t); // resumed: reviewed in an earlier run
   if (!text(t.proof) || !text(t.budget)) return block(t, 'not dispatchable: the task has no proof or no budget');
 
@@ -358,7 +360,6 @@ async function driveTask(t) {
   if (!isGitRef(place.branch)) return block(t, 'worktree failed: the helper returned an invalid branch name');
   if (!isGitRef(place.base)) return block(t, 'worktree failed: the helper returned an invalid base ref');
   const diffBase = place.base.startsWith('task/') ? place.base : prepared.start || place.base;
-  if (!isGitRef(diffBase)) return block(t, 'prepare returned an invalid start ref');
 
   if ((await agent(implementerPrompt(t, place), { agentType: implementerType })) == null) {
     return block(t, 'the implementer did not finish');
