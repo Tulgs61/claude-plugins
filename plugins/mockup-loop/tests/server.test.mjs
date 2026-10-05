@@ -273,14 +273,15 @@ test('spec 9: idle shutdown, and /__round polls do not keep the server alive', a
 });
 
 test('spec 9: a non-poll request resets the idle timer', async t => {
-  const { port, exited } = await servedLoop(t, { env: { CLICK_LOOP_TEST_IDLE_MS: '1000' } });
+  // Generous margins: slow CI runners (Windows) can take hundreds of ms per request.
+  const { port, exited } = await servedLoop(t, { env: { CLICK_LOOP_TEST_IDLE_MS: '3000' } });
   let done = false;
   exited.then(() => (done = true));
   for (let i = 0; i < 4; i++) {
-    await sleep(500);
+    await sleep(1000);
     assert.equal((await request(port, { path: '/' })).status, 200);
   }
-  assert.equal(done, false, 'still alive after 2 s of page requests with a 1 s idle limit');
-  await Promise.race([exited, sleep(5000)]);
+  assert.equal(done, false, 'still alive after 4 s of page requests with a 3 s idle limit');
+  await Promise.race([exited, sleep(10000)]);
   assert.equal(done, true);
 });

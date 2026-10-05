@@ -1,0 +1,79 @@
+# Tags and releases every plugin whose current version has no tag yet.
+# Tag convention: <name>--v<version>, the same as `claude plugin tag`.
+# Release notes: the plugin's `### [<version>]` entry in CHANGELOG.md.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Tag and release new plugin versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # One "<name> <version>" line per marketplace entry. Fails when an entry has an unsafe name,
+          # a version that is not strict semver, or a plugin.json version that differs from the entry.
+          # shellcheck disable=SC2016 # the Node program is single-quoted on purpose
+          entries="$(node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import path from "node:path";
+            const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
+            const { plugins } = JSON.parse(readFileSync(".claude-plugin/marketplace.json", "utf8"));
+            for (const p of plugins) {
+              if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(p.name)) throw new Error(`unsafe plugin name: ${p.name}`);
+              if (!semver.test(p.version)) throw new Error(`${p.name}: version is not semver: ${p.version}`);
+              const manifest = JSON.parse(readFileSync(path.join(p.source, ".claude-plugin", "plugin.json"), "utf8"));
+              if (manifest.version !== p.version) throw new Error(`${p.name}: plugin.json ${manifest.version} != marketplace ${p.version}`);
+              console.log(`${p.name} ${p.version}`);
+            }
+          ')"
+
+          while read -r name version; do
+            [ -n "$name" ] || continue
+            tag="${name}--v${version}"
+            # --exit-code: 0 = tag found, 2 = no such tag, anything else = the lookup itself failed.
+            rc=0
+            git ls-remote --exit-code --tags origin "refs/tags/${tag}" > /dev/null || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              # A run that pushed the tag but failed before the release left the release missing.
+              if gh release view "$tag" > /dev/null 2>&1; then
+                echo "${tag}: tag and release exist, skipped"
+              else
+                notes="$(node .github/scripts/changelog-section.mjs "$name" "$version")"
+                gh release create "$tag" --verify-tag --title "${name} ${version}" --notes "$notes"
+                echo "${tag}: release created for existing tag"
+              fi
+              continue
+            fi
+            [ "$rc" -eq 2 ] || { echo "${tag}: tag lookup failed (exit ${rc})" >&2; exit 1; }
+            notes="$(node .github/scripts/changelog-section.mjs "$name" "$version")"
+            git tag -a "$tag" -m "${name} ${version}"
+            git push origin "refs/tags/${tag}"
+            gh release create "$tag" --verify-tag --title "${name} ${version}" --notes "$notes"
+            echo "${tag}: released"
+          done <<< "$entries"

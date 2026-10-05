@@ -37,8 +37,9 @@ repository it is the `cwd` itself.
 ### The /fresh marker
 
 `scripts/fresh-marker.js` writes `claude-fresh-<hash>.json` into the OS temp directory
-(`os.tmpdir()`), where `<hash>` is derived from the normalized repo root. Nothing is written into the
-repository. The `/fresh` skill runs it from the installed plugin via `${CLAUDE_PLUGIN_ROOT}`.
+(`os.tmpdir()`), where `<hash>` is derived from the normalized repo root with symlinks resolved; when
+the shell reaches the repository through a symlink, a second copy is written under that spelling too.
+Nothing is written into the repository. The `/fresh` skill runs it from the installed plugin via `${CLAUDE_PLUGIN_ROOT}`.
 
 The temp directory can be shared with other local users (for example `/tmp` on a multi-user Linux
 machine), so the marker is treated as untrusted input:
@@ -51,8 +52,12 @@ machine), so the marker is treated as untrusted input:
   regular file and, on POSIX, owned by the current user and not group- or world-writable. Its
   `createdAt` must lie in the past and be less than 12 hours old; a marker dated in the future is
   ignored. On Windows there is no ownership or mode check (the temp directory is per user there).
-- **Content.** The marker supplies only `createdAt`. The hook always injects `<repo root>/HANDOVER.md`
-  and ignores any file path named in the marker (older markers had a `handover` field).
+- **Content.** The marker supplies `createdAt` and, when armed without an argument, a `roots` list of
+  the spellings it was written under. The hook uses that list only to delete the other copies, and only
+  those whose path names the same directory as the honoured root. It always injects
+  `<repo root>/HANDOVER.md` and ignores any file path named in the marker (older markers had a
+  `handover` field).
+- **Single use.** Once a marker is honoured, its copies under every spelling of the root are deleted.
 - **Cleanup.** A marker owned by the current user is deleted once read, whether or not it was honoured.
   A marker owned by someone else is ignored and left in place.
 
@@ -86,9 +91,10 @@ markers are never read or deleted.
 
 ## Origin
 
-Ported from a personal Claude Code configuration (its `handover`, `pickup` and `fresh` skills, the
-`session-start-context.js` hook, the `fresh-marker.js` script and its repo-artifact rules), with
-machine-specific paths replaced by `${CLAUDE_PLUGIN_ROOT}`.
+The skills, the SessionStart hook, the marker script and the conventions were reimplemented from the
+behaviour spec in [`docs/specs/2026-10-02-handover.md`](../../docs/specs/2026-10-02-handover.md)
+and its amendments, written fresh against that spec. Paths into the plugin go through
+`${CLAUDE_PLUGIN_ROOT}`.
 
 ## License
 
