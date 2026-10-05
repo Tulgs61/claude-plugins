@@ -7,6 +7,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdir
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { changelogSection } from '../.github/scripts/changelog-section.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const readJson = p => JSON.parse(readFileSync(p, 'utf8'));
@@ -93,6 +94,49 @@ for (const entry of entries) {
     assert.ok(checked > 0, 'hooks.json has no command hooks to check');
   });
 }
+
+// Strict SemVer 2.0.0 (the regex from semver.org): no leading zeros, no "v" prefix.
+const SEMVER =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$/;
+const CHANGELOG = path.join(ROOT, 'CHANGELOG.md');
+
+for (const entry of entries) {
+  test(`${entry.name}: version is strict semver`, () => {
+    assert.match(String(entry.version), SEMVER, `marketplace version ${entry.version} is not semver`);
+  });
+
+  test(`${entry.name}: CHANGELOG.md has a ### [${entry.version}] entry under ## ${entry.name}`, () => {
+    assert.ok(isFile(CHANGELOG), 'missing CHANGELOG.md');
+    const section = changelogSection(readFileSync(CHANGELOG, 'utf8'), entry.name, entry.version);
+    assert.notEqual(section, null, `no ### [${entry.version}] entry under ## ${entry.name}`);
+    assert.ok(section.length > 0, `the ### [${entry.version}] entry under ## ${entry.name} is empty`);
+  });
+}
+
+test('changelogSection: finds the entry only under its own plugin heading', () => {
+  const text = [
+    '# Changelog', '', '## alpha', '', '### [1.1.0] - 2026-01-02', '', '- alpha new', '',
+    '### [1.0.0] - 2026-01-01', '', '- alpha old', '', '## beta', '', '### [2.0.0] - 2026-01-03', '', '- beta', '',
+  ].join('\n');
+  assert.equal(changelogSection(text, 'alpha', '1.1.0'), '- alpha new');
+  assert.equal(changelogSection(text, 'alpha', '1.0.0'), '- alpha old');
+  assert.equal(changelogSection(text, 'beta', '2.0.0'), '- beta');
+  assert.equal(changelogSection(text, 'beta', '1.0.0'), null, 'another plugin\'s version does not count');
+  assert.equal(changelogSection(text, 'alpha', '1.1'), null, 'no prefix match');
+  assert.equal(changelogSection(text, 'gamma', '1.0.0'), null);
+  assert.equal(changelogSection('## alpha\n### [1.0.0]\n\n## beta\n', 'alpha', '1.0.0'), '', 'an empty entry is not missing');
+});
+
+test('changelog-section.mjs CLI prints the notes and fails on a missing entry', () => {
+  const script = path.join(ROOT, '.github', 'scripts', 'changelog-section.mjs');
+  const [first] = entries;
+  const ok = spawnSync(process.execPath, [script, first.name, first.version], { encoding: 'utf8' });
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.ok(ok.stdout.trim().length > 0);
+  const missing = spawnSync(process.execPath, [script, first.name, '999.0.0'], { encoding: 'utf8' });
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /no ### \[999\.0\.0\] entry/);
+});
 
 // scripts/verify.mjs reads its leak patterns from .claude/private/leaks.txt. These tests run a copy of it
 // in throwaway git repositories with made-up patterns; the real pattern file is never read here.
