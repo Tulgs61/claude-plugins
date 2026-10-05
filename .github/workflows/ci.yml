@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Configure git identity for tests that commit
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@example.invalid"
+
+      - name: Verify
+        if: runner.os != 'Windows'
+        run: node scripts/verify.mjs
+
+      # handover and tasks-ledger rely on POSIX shells and paths; only mockup-loop runs on Windows.
+      - name: Verify (mockup-loop only)
+        if: runner.os == 'Windows'
+        run: node scripts/verify.mjs --only plugins/mockup-loop
+
+  validate:
+    name: validate plugins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2
+
+      - name: Validate marketplace
+        run: claude plugin validate --strict .
+
+      - name: Validate each plugin
+        shell: bash
+        run: |
+          for d in plugins/*/; do
+            echo "::group::$d"
+            claude plugin validate --strict "$d"
+            echo "::endgroup::"
+          done
