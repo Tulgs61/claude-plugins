@@ -349,8 +349,6 @@ async function verify(t) {
 
 async function driveTask(t) {
   if (!TASK_ID.test(t.id)) return finishTask(t, 'blocked', 'task id is not of the form T<n>');
-  // A `start` from prepare is checked for every task, whether or not it becomes the diff base.
-  if (prepared.start != null && !isGitRef(prepared.start)) return block(t, 'prepare returned an invalid start ref');
   if (t.status === 'verified') return merge(t); // resumed: reviewed in an earlier run
   if (!text(t.proof) || !text(t.budget)) return block(t, 'not dispatchable: the task has no proof or no budget');
 
@@ -424,9 +422,20 @@ async function syncTasks() {
   else log(`sync failed: ${answer.error || 'unknown error'}`);
 }
 
+// A `start` from prepare is checked once, before any task agent runs. An invalid one stops the run
+// and blocks every task it would otherwise drive.
+const badStart = prepared.start != null && !isGitRef(prepared.start);
+if (badStart) {
+  const shown = JSON.stringify(String(prepared.start)).slice(0, 80);
+  stopped = `prepare returned an invalid start ref ${shown}`;
+  for (const t of tasks.values()) {
+    if (t.status === 'todo' || t.status === 'verified') await block(t, `prepare returned an invalid start ref ${shown}`);
+  }
+}
+
 phase('run tasks');
 try {
-  for (;;) {
+  while (!badStart) {
     if (stopped === null) {
       // `running` grows inside this loop, so two tasks that become ready together never overlap.
       for (const t of tasks.values()) if (!running.has(t.id) && ready(t)) start(t);
@@ -461,9 +470,11 @@ if (stopped === null && prepared.prs === true) {
 }
 if (stopped !== null) stopped = oneLine(stopped);
 
+// The run id comes last, so the helper removes the lock only while it still names this run; a
+// finished run passes an empty reason to keep it in place.
 const finished = stopped === null
-  ? await ops('finish', 'finished')
-  : await ops('finish', 'stopped', quoteText(stopped));
+  ? await ops('finish', 'finished', '""', runId)
+  : await ops('finish', 'stopped', quoteText(stopped), runId);
 if (!finished.ok) log(`finish failed: ${finished.error || 'unknown error'}`);
 
 return {
