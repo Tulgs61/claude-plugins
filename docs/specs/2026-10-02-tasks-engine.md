@@ -300,3 +300,10 @@ These amendments take precedence over the sections above where they differ.
 2. **`..` in ref names** is rejected, as git itself rejects it.
 3. **Tests** cover an invalid `start` for a task whose base begins with `task/`, a `stopped` text
    coming from unfinished tasks, and that the reason passed to `finish` has no line break.
+
+## Amendments (rev 6)
+
+1. **Run id on `sync`.** Every `sync` call the engine makes carries the run's own run id as its
+   argument, so the helper refreshes the lock only while it still names this run (tasks-git rev 5,
+   amendment 2). The ops prompt keeps its pinned form, with the run id as the one argument after
+   `sync`.
