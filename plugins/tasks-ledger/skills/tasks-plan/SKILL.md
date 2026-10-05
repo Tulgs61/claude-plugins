@@ -28,7 +28,12 @@ the repository except the ledger file.
 ## 2. Create or refresh
 
 - **New ledger**: name it `.claude/runs/YYYY-MM-DD-<topic>.json`, with today's date and a short
-  kebab-case `topic` that matches `^[a-z0-9][a-z0-9-]*$`. Set `runStatus` to `planned`.
+  kebab-case slug that matches `^[a-z0-9][a-z0-9-]*$`. Set `runStatus` to `planned`.
+- **`topic`, always**: every ledger you write, new or refreshed, has a top-level `topic` equal to the
+  slug in its file name (the name without the `YYYY-MM-DD-` date and the `.json`). The helper names
+  every branch and worktree after it and refuses a ledger without a valid one. If a refreshed ledger
+  lacks `topic` or holds a different value, set it from the file name; if the file name has no slug
+  that matches the pattern, stop and report instead of writing.
 - **Existing ledger** (the input names one, or one for the same topic exists): first check for a
   `<same name>.lock` next to it. If that lock's `at` is less than six hours old, a run owns the
   ledger: do not write it; tell the caller to use `/tasks add` instead. Otherwise you may add tasks
@@ -54,10 +59,21 @@ Each task gets:
 Partitioning rules:
 
 - Split by file, not by symptom. Changes that need the same file belong to one task.
-- Where two tasks' `files` globs could match a common path, link them through `dependsOn` (the
-  later task depends on the earlier one, directly or through a chain). Judge this conservatively:
-  compare the fixed leading directories of the two globs; if one is a prefix of the other, or a glob
-  starts with a wildcard, a brace or `!`, or contains `..`, treat them as overlapping.
+- Where two tasks' `files` globs overlap, link them through `dependsOn` (the later task depends on
+  the earlier one, directly or through a chain). Use the helper's overlap rule exactly, since the
+  helper warns about every overlapping pair that no `dependsOn` path links:
+  1. Matching ignores case, and `\` counts as `/`.
+  2. A pattern that contains `..` anywhere (not only as a whole segment, so `a/b..c` too) overlaps
+     every other pattern.
+  3. Otherwise split the pattern at `/`, drop empty and `.` segments, and keep its literal segment
+     prefix: the segments up to, not including, the first segment that holds a glob character
+     (`*`, `?`, `[`, `]`, `{`, `}`, `(`, `)`) or starts with `!`.
+  4. Two patterns are disjoint only when their prefixes differ at a position where both have a
+     segment. Otherwise they overlap; in particular, when one prefix is a prefix of the other, and
+     whenever a prefix is empty (a pattern starting with a glob segment overlaps everything).
+
+  So `src/api/**` and `src/API/user.ts` overlap, `src/api/**` and `src/web/**` do not, and
+  `src/*.ts` overlaps both.
 - Apart from overlaps, add a `dependsOn` edge only for a real dependency: one task needs code,
   an interface or data that another task produces. Independent work stays unlinked so it can run
   in parallel.
@@ -80,7 +96,9 @@ Partitioning rules:
 
 Check the file against `${CLAUDE_PLUGIN_ROOT}/schemas/tasks.schema.json`: the required keys are
 present, ids and `dependsOn` entries match `^T[0-9]+$`, statuses and `runStatus` are from their
-enums, and tasks carry no keys beyond the ones the schema lists. Fix anything that does not pass.
+enums, and tasks carry no keys beyond the ones the schema lists. Check as well that `topic` is
+present, matches `^[a-z0-9][a-z0-9-]*$`, and equals the slug in the ledger's file name. Fix anything
+that does not pass.
 
 Then reply briefly:
 

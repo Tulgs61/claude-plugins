@@ -31,7 +31,21 @@ absent: the proof, the budget, or both.
 
 Ask as well, rather than inventing, when the outcome or the file scope is unclear.
 
-## 3. Write the six parts
+## 3. Settle where the commits go
+
+The work is committed on a task branch in its own worktree, never on a permanent branch (`main`,
+`master`, `develop`, `trunk`, or the project's base branch) and never in the main checkout.
+
+- If the ledger task has a `branch` and `worktree` that meet this, use them.
+- Otherwise propose a branch `task/<slug>` and a worktree `<root>/.claude/worktrees/<slug>`, where
+  `<root>` is the main checkout's top level and `<slug>` a short kebab-case name, and show the one
+  command that creates both from the base the user works from:
+  `git -C <root> worktree add -b task/<slug> <root>/.claude/worktrees/<slug> <base>`. The implementer
+  does not create branches or worktrees itself, so this runs before the contract is handed over.
+- If the task or the user names a permanent branch or the main checkout as the place to commit,
+  do not use it; say why and propose a task branch as above.
+
+## 4. Write the six parts
 
 Use exactly these labels, each at the start of its own line and in this order, so the
 dispatch-guard hook recognises the PROOF and BUDGET sections:
@@ -40,7 +54,7 @@ dispatch-guard hook recognises the PROOF and BUDGET sections:
 OUTCOME: <observable end state, phrased as what is true afterwards, not as activity>
 PROOF: <the exact command to run; its output must appear in the agent's transcript>
 CONSTRAINTS: <what must stay unchanged; the only paths that may change: <globs>; other limits>
-DELIVERABLE: commits on <branch> in <worktree or "the current worktree">; no merge, no push to a permanent branch
+DELIVERABLE: commits on <task branch> in <task worktree>, both from step 3; no merge, no push to a permanent branch
 BUDGET: <stop clause, e.g. "stop after 40 turns and report what blocks">
 ESCALATION: <when to stop and ask instead of guessing: schema or migration changes, auth or payment code, an ambiguous spec, any file outside the scope, plus task-specific cases>
 ```
@@ -53,15 +67,16 @@ Rules for the content:
   constraints also require that it passes.
 - A multi-line part continues on indented lines below its label.
 
-## 4. Render it three ways
+## 5. Render it three ways
 
 Show the same contract in these three forms, in this order, each ready to paste:
 
 1. **Agent call**: an Agent tool call with `subagent_type: "tasks-ledger:task-implementer"` (or the
    agent the user named), a short `description`, and the contract as `prompt`.
-2. **`claude --bg` command**: one shell command, run from the repository or worktree, that passes
+2. **`claude --bg` command**: one shell command, run from the task worktree of step 3, that passes
    the contract as the prompt, quoted so the shell leaves it intact (a single-quoted string or a
    heredoc).
-3. **`/goal`**: `/goal` followed by the contract, for use inside an existing session.
+3. **`/goal`**: `/goal` followed by the contract, for use inside a session that runs in the task
+   worktree of step 3.
 
 End with one line naming any assumption you made while filling the parts.
