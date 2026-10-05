@@ -16,7 +16,7 @@ the SessionStart hook hands that file to the new session, which picks the work u
    user what the session should do once the context is cleared.
 2. **Write a compact handover.** The file is `<root>/HANDOVER.md`, where the root comes from
    `git rev-parse --show-toplevel` run in the session's project directory (or is that directory when
-   there is no repository); note this absolute root path, step 3 needs it. Apply
+   there is no repository); note the absolute path of the file, step 3 needs it. Apply
    the handover skill and `${CLAUDE_PLUGIN_ROOT}/rules/conventions.md`, adjusted as follows:
    - put the user's request under `## Next action`, rewritten so it stands on its own: replace
      pointers such as "it", "this function" or "the failing test" with real file paths, identifiers
@@ -27,25 +27,34 @@ the SessionStart hook hands that file to the new session, which picks the work u
    - base the recorded state on commands you run, and leave out forge checks when neither `gh` nor
      `glab` is installed;
    - keep secrets and customer data out, and leave the file uncommitted.
-3. **Set the marker.** Earlier commands may have left the shell in another directory, so first return
-   it to the session's project directory: the repository root from step 2, whose `HANDOVER.md` you
-   just wrote. Then run the script without a directory argument, in the same command:
+3. **Set the marker.** Run the bare command in the shell's current directory, which is the session's
+   project directory. Do not `cd` anywhere first, not to the root from step 2 and not to any other
+   path printed by git or another tool: the script must see the directory spelled the way the
+   session sees it, symlinks included, or the hook will not find the marker.
 
    ```bash
-   cd "<root from step 2>" &&
    node "${CLAUDE_PLUGIN_ROOT}/scripts/fresh-marker.js"
    ```
 
-   The script works from its own process working directory, which is now the session's project
-   directory, and arms the marker for the repository root containing it. On success it prints
-   `fresh marker armed for <root> (<marker path>)`.
+   The script arms the marker for the repository root containing its working directory. On success it
+   prints `fresh marker armed for <root> (<marker path>)`.
 
-   Compare the `<root>` in that success line with the repository root from step 2. The arm failed
-   when the script exits non-zero, when there is no success line, or when the line names a different
-   root; a marker armed for another repository will not bring this handover back. In every one of
-   these cases tell the user the marker was not set for this repository, pass on the script's output
-   (its error output, or the success line with the wrong root), and explain that the handover will
-   not load by itself after the clear; they can call `/pickup` once the context is empty.
+   **Check that the marker belongs to this handover.** The root in the success line may be spelled
+   differently from the root in step 2 (a symlink, other letter case, other separators), so never
+   compare the two as strings. Compare files by identity instead:
+
+   ```bash
+   test '<root from the success line>/HANDOVER.md' -ef '<HANDOVER.md written in step 2>' && echo same-file
+   ```
+
+   Put every path into that command in single quotes, and write each single quote inside a path as
+   `'\''` (so `/a/it's` becomes `'/a/it'\''s'`).
+
+   The arm succeeded only when the script exited 0, printed the success line, and the check printed
+   `same-file`. Anything else is a failed arm: a non-zero exit, no success line, a check that fails, or
+   a check you cannot run. In that case tell the user the marker was not set for the `HANDOVER.md`
+   you just wrote, pass on the script's output, and explain that the handover will not load by itself
+   after the clear: they should run `/clear` and then continue with `/pickup`.
 4. **Give the user two short instructions:** run `/clear`, then send any further message, such as
    `go`. Mention that the marker works a single time and expires after 12 hours.
 
