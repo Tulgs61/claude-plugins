@@ -21,6 +21,8 @@ const RUN_ID_RE = /^[A-Za-z0-9-]{4,64}$/;
 const SETTABLE = ['blocked', 'done', 'in_progress', 'todo', 'verified'];
 const RUN_STATUSES = ['finished', 'running', 'stopped'];
 const LOCK_TTL_MS = 6 * 60 * 60 * 1000;
+const GUARD_STALE_MS = 10 * 1000;
+const GUARD_WAIT_MAX_MS = 30 * 1000;
 const DEFAULT_CHECK_TIMEOUT_MIN = 30;
 const EVIDENCE_MAX = 4000;
 const TAIL_MAX = 2000;
@@ -262,73 +264,117 @@ const lockedFailure = held => {
 
 const errCode = e => e && e.code;
 
-// Takes the lock atomically. A missing lock is created with link(2), which fails when another
-// call created it first; an existing lock is first renamed aside (only one caller can do that) and
-// checked to be the lock that was judged replaceable. Losers re-read the lock and are refused when
-// it now belongs to a live foreign run. Returns { previous, written }: the lock text before the
-// call (null when there was none) and the text this call wrote.
-function acquireLock(ctx, runId, takeover) {
-  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const written = JSON.stringify({ runId, at: Date.now() }) + '\n';
-  const tmp = `${ctx.lockFile}.new-${token}`;
-  fs.writeFileSync(tmp, written);
+const sleepMs = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+// Removes a guard file older than GUARD_STALE_MS, left behind by a crashed caller. The guard is
+// renamed aside first (only one caller can do that); when the file moved aside turns out to be a
+// newer guard than the one judged abandoned, it is linked back.
+function breakAbandonedGuard(guard, token) {
+  let judged;
   try {
-    for (let attempt = 0; attempt < 50; attempt++) {
-      const previous = readLockText(ctx);
-      const held = previous === null ? null : parseLock(previous);
-      if (isLiveForeign(held, runId) && !takeover) lockedFailure(held);
-
-      if (previous === null) {
-        try {
-          fs.linkSync(tmp, ctx.lockFile);
-          return { previous: null, written };
-        } catch (e) {
-          if (errCode(e) === 'EEXIST') continue;
-          throw e;
-        }
-      }
-
-      const aside = `${ctx.lockFile}.old-${token}`;
-      try {
-        fs.renameSync(ctx.lockFile, aside);
-      } catch (e) {
-        if (errCode(e) === 'ENOENT') continue;
-        throw e;
-      }
-      if (fs.readFileSync(aside, 'utf8') !== previous) {
-        // The lock changed between reading and renaming it: put it back and judge it again.
-        try {
-          fs.linkSync(aside, ctx.lockFile);
-        } catch {}
-        fs.rmSync(aside, { force: true });
-        continue;
-      }
-      try {
-        fs.linkSync(tmp, ctx.lockFile);
-      } catch (e) {
-        fs.rmSync(aside, { force: true });
-        if (errCode(e) === 'EEXIST') continue;
-        throw e;
-      }
-      fs.rmSync(aside, { force: true });
-      return { previous, written };
-    }
-    const held = readLock(ctx);
-    fail(`another run (${(held && held.runId) || 'unknown'}) keeps changing this ledger's lock; try again`, { locked: true });
-  } finally {
-    fs.rmSync(tmp, { force: true });
+    judged = fs.statSync(guard);
+  } catch {
+    return;
   }
+  if (Date.now() - judged.mtimeMs < GUARD_STALE_MS) return;
+  const aside = `${guard}.abandoned-${token}`;
+  try {
+    fs.renameSync(guard, aside);
+  } catch {
+    return;
+  }
+  try {
+    if (fs.statSync(aside).ino !== judged.ino) fs.linkSync(aside, guard);
+  } catch {}
+  fs.rmSync(aside, { force: true });
+}
+
+// Runs fn while holding the lock guard `<lock>.guard`, an exclusively created file, so that at
+// most one caller at a time reads, judges and writes the run lock.
+function withLockGuard(ctx, fn) {
+  const guard = `${ctx.lockFile}.guard`;
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const deadline = Date.now() + GUARD_WAIT_MAX_MS;
+  for (;;) {
+    try {
+      fs.writeFileSync(guard, token, { flag: 'wx' });
+      break;
+    } catch (e) {
+      if (errCode(e) !== 'EEXIST') throw e;
+    }
+    breakAbandonedGuard(guard, token);
+    if (Date.now() > deadline) fail(`the run lock of this ledger is busy (${guard}); try again`, { locked: true });
+    sleepMs(5 + Math.floor(Math.random() * 20));
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      if (fs.readFileSync(guard, 'utf8') === token) fs.rmSync(guard, { force: true });
+    } catch {}
+  }
+}
+
+const processAlive = pid => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return errCode(e) === 'EPERM';
+  }
+};
+
+// Takes the lock under the guard. A live foreign lock is refused unless `takeover` is given.
+// `takeover` replaces the lock of a run, not one a concurrent prepare has just taken: it refuses a
+// lock written since this call started and a lock whose prepare is still running.
+// Returns { previous, written }: the lock text before the call (null when there was none) and the
+// text this call wrote; the written lock is marked `preparing` until settleLock.
+function acquireLock(ctx, runId, takeover) {
+  return withLockGuard(ctx, () => {
+    const previous = readLockText(ctx);
+    const held = previous === null ? null : parseLock(previous);
+    if (isLiveForeign(held, runId)) {
+      const at = Number(held.at);
+      const sinceStart = at >= ctx.startedAt && at <= Date.now();
+      const preparing = held.preparing === true && processAlive(held.pid);
+      if (!takeover || sinceStart || preparing) lockedFailure(held);
+    }
+    const at = Date.now();
+    const written = JSON.stringify({ runId, at, pid: process.pid, preparing: true }) + '\n';
+    writeAtomic(ctx.lockFile, written);
+    return { previous, written, runId, at };
+  });
+}
+
+// Drops the `preparing` mark once prepare has succeeded, unless another call has replaced the lock.
+function settleLock(ctx, { written, runId, at }) {
+  withLockGuard(ctx, () => {
+    if (readLockText(ctx) === written) writeAtomic(ctx.lockFile, JSON.stringify({ runId, at }) + '\n');
+  });
 }
 
 // Puts back the lock that was there before acquireLock, unless another call has replaced ours since.
 function restoreLock(ctx, { previous, written }) {
-  if (readLockText(ctx) !== written) return;
-  if (previous === null) fs.rmSync(ctx.lockFile, { force: true });
-  else writeAtomic(ctx.lockFile, previous);
+  withLockGuard(ctx, () => {
+    if (readLockText(ctx) !== written) return;
+    if (previous === null) fs.rmSync(ctx.lockFile, { force: true });
+    else writeAtomic(ctx.lockFile, previous);
+  });
 }
 
 function removeLock(ctx) {
-  fs.rmSync(ctx.lockFile, { force: true });
+  withLockGuard(ctx, () => fs.rmSync(ctx.lockFile, { force: true }));
+}
+
+// Sets the lock's `at` to now, keeping its runId. With a runId, only that run's lock is refreshed.
+function refreshLock(ctx, runId) {
+  withLockGuard(ctx, () => {
+    const lock = readLock(ctx);
+    if (!lock) return;
+    if (runId !== undefined && lock.runId !== runId) return;
+    writeAtomic(ctx.lockFile, JSON.stringify({ ...lock, at: Date.now() }) + '\n');
+  });
 }
 
 // ---- inbox -------------------------------------------------------------------------------------
@@ -407,12 +453,11 @@ function opStatus(ctx, [id, status, evidence]) {
   return { id, status };
 }
 
-function opSync(ctx) {
+function opSync(ctx, [runId]) {
   const { added, consume } = ingestInbox(ctx);
   if (added.length) persistLedger(ctx);
   consume();
-  const lock = readLock(ctx);
-  if (lock) writeAtomic(ctx.lockFile, JSON.stringify({ ...lock, at: Date.now() }) + '\n');
+  refreshLock(ctx, runId);
   return { added, tasks: listing(ctx.L) };
 }
 
@@ -500,6 +545,11 @@ function opPrepare(ctx, [runId, takeover]) {
     L.integrationBranch = intBranch;
     persistLedger(ctx);
     consume();
+    try {
+      settleLock(ctx, lock);
+    } catch {
+      // The mark is harmless once this process has exited.
+    }
 
     return { added, integration, prs: L.prs === true, root, start, tasks: listing(L), warnings };
   } catch (e) {
@@ -805,6 +855,7 @@ const COMMANDS = {
 };
 
 function main(argv) {
+  const startedAt = Date.now();
   const [cmd, ledgerArg, ...rest] = argv;
   if (!cmd || !ledgerArg) fail(`usage: tasks-git.js <${Object.keys(COMMANDS).join('|')}> <ledger> [args...]`);
   if (!Object.prototype.hasOwnProperty.call(COMMANDS, cmd)) fail(`unknown command ${cmd}`);
@@ -826,7 +877,7 @@ function main(argv) {
   validateLedger(L);
 
   const stem = ledgerFile.replace(/\.json$/, '');
-  const ctx = { root, ledgerFile, L, lockFile: `${stem}.lock`, inboxFile: `${stem}.inbox.jsonl` };
+  const ctx = { root, ledgerFile, L, startedAt, lockFile: `${stem}.lock`, inboxFile: `${stem}.inbox.jsonl` };
   return COMMANDS[cmd](ctx, rest);
 }
 
