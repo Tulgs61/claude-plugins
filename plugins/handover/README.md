@@ -86,9 +86,10 @@ markers are never read or deleted.
 
 ## Origin
 
-Ported from a personal Claude Code configuration (its `handover`, `pickup` and `fresh` skills, the
-`session-start-context.js` hook, the `fresh-marker.js` script and its repo-artifact rules), with
-machine-specific paths replaced by `${CLAUDE_PLUGIN_ROOT}`.
+The skills, the SessionStart hook, the marker script and the conventions were reimplemented from the
+behaviour spec in [`docs/specs/2026-10-02-handover.md`](../../docs/specs/2026-10-02-handover.md)
+and its amendments, written fresh against that spec. Paths into the plugin go through
+`${CLAUDE_PLUGIN_ROOT}`.
 
 ## License
 

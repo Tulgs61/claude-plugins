@@ -84,23 +84,27 @@ documented git rules name for feature work; if they name none, the repository's 
 
 ## `.claude/verify.cmd` (opt-in)
 
-A project opts in to verification by committing `.claude/verify.cmd`: one line with the exact,
-safe, fast check command (unit tests, lint, type check — never a suite that touches real
-databases or services), for example `npm test --silent && npm run lint`. The Stop hook is opt-in
-per project; a `/tasks` run requires the file (committed, so every worktree has it).
+A repository opts in to verification by committing `.claude/verify.cmd`. Its content is one bash
+command, usually a single line, that runs the repository's fast and safe checks (unit tests, lint, type
+check; never a suite that reaches real databases or services) and exits 0 when they pass, for example
+`npm test --silent && npm run lint`. The Stop hook is opt-in per project; a `/tasks` run requires
+the file (committed, so every worktree has it).
 
 - The `verify-gate` hook marks a session dirty after Edit/Write/MultiEdit/NotebookEdit and, when the
-  turn would end, looks for `.claude/verify.cmd` with a bounded rule. It takes the nearest ancestor
-  of the hook's working directory (that directory included) that contains `.git` (the repository
-  or worktree root). Inside a repository it searches from the working directory upward to that
-  root inclusive, and the nearest file wins. Outside any repository it checks only
-  `<cwd>/.claude/verify.cmd`. On POSIX it skips (treats as absent) a `verify.cmd` that is not owned
-  by the current user or is group- or world-writable. The command runs with bash in the directory
-  where the file was found (timeout 3 minutes). The hook does not use `CLAUDE_PROJECT_DIR`, so a
-  subagent in a worktree verifies its own worktree. A failure blocks the stop with the output
-  tail; after 3 failed attempts it stops blocking and leaves the decision to the human. Without
-  the file the hook does nothing.
+  turn would end, looks for `.claude/verify.cmd` with a bounded rule. It starts from the working
+  directory of the session that stops (the hook input's `cwd`) and takes the nearest ancestor of
+  it (that directory included) that contains `.git` (the repository or worktree root). Inside a
+  repository it searches from the working directory upward to that root inclusive, and the nearest
+  file wins. Outside any repository it checks only `<cwd>/.claude/verify.cmd`. On POSIX it skips
+  (treats as absent) a `verify.cmd` that is not owned by the current user or is group- or
+  world-writable. The command runs with bash in the directory where the file was found (timeout 3
+  minutes). The hook ignores `CLAUDE_PROJECT_DIR`. It is registered for `Stop` only, and
+  subagents fire `SubagentStop` instead, so it never gates a subagent. A failure blocks the stop
+  with the output tail; after 3 failed attempts it stops blocking and leaves the decision to the
+  human. Without the file the hook does nothing.
 - Task-implementers run it before they finish, and the tasks workflow re-runs it in every task
   worktree and on the integration branch (after the ledger's `setup`, followed by its `suite`).
+- Change `verify.cmd` outside a run: `tasks-git` `verify` and `merge` refuse a task whose branch
+  modifies it compared with the task's base.
 - The command runs with your user's rights. Review a cloned repository's `.claude/verify.cmd`
   before you edit files in it with this plugin enabled.

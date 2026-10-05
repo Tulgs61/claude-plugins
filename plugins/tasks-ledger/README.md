@@ -7,7 +7,7 @@ A Claude Code plugin that turns a list of tasks into a delegated, reviewed run:
    worktree, `.claude/verify.cmd` re-run per task, an independent `reviewer` per task, dependency-ordered
    local merges into an integration branch, and — only if you asked — one draft PR per task.
 3. Two hooks keep delegation honest in every session: no implementer dispatch without proof and budget,
-   and no end of turn after edits while the project's verify command fails.
+   and no end of a main-session turn after edits while the project's verify command fails.
 
 The rules everything here follows (dispatch contract, writer ≠ reviewer, ledger/worktree/branch layout,
 the `.claude/verify.cmd` opt-in) are in [`rules/conventions.md`](rules/conventions.md).
@@ -82,7 +82,7 @@ file name (`claude-verify-<session>.json` in the OS temp dir), so they clear and
 |---|---|---|
 | `PreToolUse` on `Agent` | [`dispatch-guard.js`](hooks/dispatch-guard.js) | Blocks (exit 2) an Agent call to `implementer` or `task-implementer` (any plugin prefix) whose prompt has no `PROOF` or no `BUDGET` section, and points at the dispatch skill. Other agents pass. |
 | `PostToolUse` on `Edit\|Write\|MultiEdit\|NotebookEdit` | [`verify-gate.js`](hooks/verify-gate.js) | Marks the session dirty (state file in the OS temp dir). |
-| `Stop` | [`verify-gate.js`](hooks/verify-gate.js) | If dirty, looks for `.claude/verify.cmd`: inside a repository from the hook's working directory upward to the nearest directory that contains `.git` (the repository or worktree root) inclusive, nearest file wins; outside any repository only `<cwd>/.claude/verify.cmd`. On POSIX a `verify.cmd` not owned by the current user or group/world-writable is skipped. Runs it with bash in the directory where it was found (3-minute timeout). On failure it blocks that stop (exit 2) and hands Claude the output tail. It blocks once per stop chain: a stop that follows a block (`stop_hook_active`) is allowed without re-running the check. After 3 failed runs without a new edit it stops blocking and only warns. Does nothing without the file. It does not use `CLAUDE_PROJECT_DIR`, so a subagent in a worktree verifies that worktree, not the main checkout. |
+| `Stop` | [`verify-gate.js`](hooks/verify-gate.js) | If dirty, looks for `.claude/verify.cmd`: inside a repository from the working directory of the session that stops upward to the nearest directory that contains `.git` (the repository or worktree root) inclusive, nearest file wins; outside any repository only `<cwd>/.claude/verify.cmd`. On POSIX a `verify.cmd` not owned by the current user or group/world-writable is skipped. Runs it with bash in the directory where it was found (3-minute timeout). On failure it blocks that stop (exit 2) and hands Claude the output tail. It blocks once per stop chain: a stop that follows a block (`stop_hook_active`) is allowed without re-running the check. After 3 failed runs without a new edit it stops blocking and only warns. Does nothing without the file. It follows the hook input's `cwd` and ignores `CLAUDE_PROJECT_DIR`. Subagents fire `SubagentStop`, not `Stop`, so this gate does not run when a subagent finishes; task-implementers run `verify.cmd` themselves and the workflow re-runs it per worktree. |
 
 ## Files
 
