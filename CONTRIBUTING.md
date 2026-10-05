@@ -48,6 +48,11 @@ A task worktree uses the main checkout's file unless it has its own. Without the
 skipped with a notice and the other checks still run. Findings name the pattern by its line number in
 `leaks.txt`, never by its text.
 
+Workflow actions are pinned to full commit SHAs, with the release tag as a trailing comment, and
+Dependabot proposes updates to both. The actionlint download script in `ci.yml` is fetched by commit
+inside a `run:` step, which Dependabot does not see, so that pin and its version argument are updated
+by hand.
+
 ## Pull requests
 
 - One concern per pull request.
