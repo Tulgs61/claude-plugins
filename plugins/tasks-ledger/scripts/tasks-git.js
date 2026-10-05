@@ -303,7 +303,9 @@ function withLockGuard(ctx, fn) {
       if (errCode(e) !== 'EEXIST') throw e;
     }
     breakAbandonedGuard(guard, token);
-    if (Date.now() > deadline) fail(`the run lock of this ledger is busy (${guard}); try again`, { locked: true });
+    if (Date.now() > deadline) {
+      fail(`another run (unknown, holding the lock guard ${guard}) is using the run lock of this ledger; try again`, { locked: true });
+    }
     sleepMs(5 + Math.floor(Math.random() * 20));
   }
   try {
@@ -363,8 +365,15 @@ function restoreLock(ctx, { previous, written }) {
   });
 }
 
-function removeLock(ctx) {
-  withLockGuard(ctx, () => fs.rmSync(ctx.lockFile, { force: true }));
+// Removes the lock. With a runId, only a lock naming that run is removed.
+function removeLock(ctx, runId) {
+  withLockGuard(ctx, () => {
+    if (runId !== undefined) {
+      const lock = readLock(ctx);
+      if (!lock || lock.runId !== runId) return;
+    }
+    fs.rmSync(ctx.lockFile, { force: true });
+  });
 }
 
 // Sets the lock's `at` to now, keeping its runId. With a runId, only that run's lock is refreshed.
@@ -435,12 +444,12 @@ function ingestInbox(ctx) {
 
 // ---- commands ----------------------------------------------------------------------------------
 
-function opFinish(ctx, [runStatus, reason]) {
+function opFinish(ctx, [runStatus, reason, runId]) {
   if (!RUN_STATUSES.includes(runStatus)) fail(`bad runStatus ${runStatus}: expected one of ${RUN_STATUSES.join(', ')}`);
   ctx.L.runStatus = runStatus;
   ctx.L.stopReason = reason === undefined ? null : reason;
   persistLedger(ctx);
-  removeLock(ctx);
+  removeLock(ctx, runId);
   return { runStatus, tasks: listing(ctx.L) };
 }
 
