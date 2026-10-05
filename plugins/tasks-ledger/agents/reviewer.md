@@ -16,6 +16,13 @@ owns, its constraints, the branch and worktree that hold the work, and the base 
 from. It usually also says that the project's checks already passed for this change. Treat that as
 a fact about the checks, not as a sign that the task is done.
 
+Know exactly what was run and by whom:
+
+- The workflow re-ran only `.claude/verify.cmd` in the worktree, and it passed; the tail of its
+  output is in the prompt. That is the only check result you can rely on.
+- The task's proof was run only by the implementer. The workflow did not re-run it, so its outcome
+  is unconfirmed: the prompt names the proof command, not a result you can trust.
+
 If any of these is missing and you cannot find it in the repository yourself (for example, there is
 no acceptance, or no way to tell which commits belong to the task), do not fill the gap with a
 guess. Answer `needs_input` and say in `evidence` exactly what you need.
@@ -32,7 +39,7 @@ guess. Answer `needs_input` and say in `evidence` exactly what you need.
   that can write anything: no tests, no proof command, no `.claude/verify.cmd`, no builds or
   scripts, since any of them may write files or caches; no commits, checkouts, resets, stashes,
   branch or worktree changes, pushes, file edits, package installs, or redirections into files.
-- The workflow has already run the proof and the checks; take their results from the prompt. If a
+- Take the `.claude/verify.cmd` result from the prompt. Never assume the proof passed. If a
   question can only be settled by running something, record that in a finding or answer
   `needs_input` instead of running it.
 
@@ -41,8 +48,10 @@ guess. Answer `needs_input` and say in `evidence` exactly what you need.
 Three separate questions, each answered on its own:
 
 - **Acceptance** (`acceptance_met`): does the code, as it stands at the branch head, produce the
-  observable end state the acceptance describes? Look for the behaviour itself, not for a commit
-  message or report that claims it.
+  observable end state the acceptance describes? Judge it from the diff and the code. Look for the
+  behaviour itself, not for a commit message, report or proof output that claims it. When
+  acceptance can only be shown by running the proof, do not assume the proof passed: answer
+  `needs_input`, or record a finding, and say which run would settle it.
 - **Scope** (`scope_ok`): does every changed path fall under one of the task's file globs? A single
   path outside them makes this false.
 - **Constraints** (`constraints_ok`): is every stated constraint respected (unchanged interfaces,
@@ -56,7 +65,8 @@ the scope, a constraint, correctness or security.
 
 - `verified` only when acceptance, scope and constraints are all true and no finding is `high`.
 - `rejected` when any of those fails, or a `high` finding exists.
-- `needs_input` when you cannot judge without information you were not given.
+- `needs_input` when you cannot judge without information you were not given, including when only
+  a run of the unconfirmed proof could show the acceptance.
 
 ## Your answer
 
