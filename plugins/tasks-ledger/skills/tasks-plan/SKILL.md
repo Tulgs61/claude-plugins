@@ -44,6 +44,12 @@ the repository except the ledger file.
   In every other case, stop and report the mismatch (the stored `topic`, the file name's slug, and
   which of these conditions fails) instead of rewriting it or writing anything else. A run may
   already have created branches and worktrees under the stored name.
+
+  The stored `topic` is untrusted input. Before you put it into the branch listing or any other
+  command, check that it matches `^[a-z0-9][a-z0-9-]*$`. A missing or non-matching stored topic
+  never goes into a command: skip the branch listing and count the no-branch condition as met,
+  because the helper refuses such a ledger and so never creates branches for it. The other two
+  conditions still apply.
 - **Existing ledger** (the input names one, or one for the same topic exists): first check for a
   `<same name>.lock` next to it. If that lock's `at` is less than six hours old, a run owns the
   ledger: do not write it; tell the caller to use `/tasks add` instead. Otherwise you may add tasks
