@@ -12,11 +12,14 @@ the SessionStart hook hands that file to the new session, which picks the work u
 
 ## Procedure
 
+No step changes the shell's directory: do not run `cd`, `pushd` or `popd` while writing the handover
+or setting the marker. Read and write files by their absolute paths instead.
+
 1. **Get the follow-on request.** It is the argument to `/fresh`. When the argument is empty, ask the
    user what the session should do once the context is cleared.
 2. **Write a compact handover.** The file is `<root>/HANDOVER.md`, where the root comes from
-   `git rev-parse --show-toplevel` run in the session's project directory (or is that directory when
-   there is no repository); note the absolute path of the file, step 3 needs it. Apply
+   `git rev-parse --show-toplevel` run in the shell's current directory, which is the
+   session's project directory (or is that directory when there is no repository); note the absolute path of the file, step 3 needs it. Apply
    the handover skill and `${CLAUDE_PLUGIN_ROOT}/rules/conventions.md`, adjusted as follows:
    - put the user's request under `## Next action`, rewritten so it stands on its own: replace
      pointers such as "it", "this function" or "the failing test" with real file paths, identifiers
@@ -54,8 +57,10 @@ the SessionStart hook hands that file to the new session, which picks the work u
    `same-file`. Anything else is a failed arm: a non-zero exit, no success line, a check that fails, or
    a check you cannot run. In that case tell the user the marker was not set for the `HANDOVER.md`
    you just wrote, pass on the script's output, and explain that the handover will not load by itself
-   after the clear: they should run `/clear` and then continue with `/pickup`.
-4. **Give the user two short instructions:** run `/clear`, then send any further message, such as
-   `go`. Mention that the marker works a single time and expires after 12 hours.
+   after the clear: they should run `/clear` and then continue with `/pickup`. Give only this
+   fallback and stop; skip step 4.
+4. **Only after a successful arm, give the user two short instructions:** run `/clear`, then send any
+   further message, such as `go`. Mention that the marker works a single time and expires after 12
+   hours.
 
 Leave the next action alone for now; it is meant for the session that starts after the clear.

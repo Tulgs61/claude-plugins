@@ -2,7 +2,9 @@
 'use strict';
 // SessionStart hook for the handover plugin.
 //
-// - clear + trusted, fresh /fresh marker + HANDOVER.md: inject the handover essentials once.
+// - clear + trusted, fresh /fresh marker + HANDOVER.md: inject the handover essentials once. The
+//   marker is looked up under the lexical root and, failing that, under the root with symlinks
+//   resolved.
 // - compact / resume: remind to re-read the active plan and task ledger.
 // - every source but compact (and not after a fresh resume): hint at /pickup when HANDOVER.md exists.
 //
@@ -220,6 +222,28 @@ function freshContext(handover, text) {
   ].join('\n');
 }
 
+// The root as found lexically, then the same root with symlinks resolved when that is spelled
+// differently, so a marker armed under either spelling is found.
+function rootSpellings(root) {
+  const roots = [root];
+  try {
+    const real = fs.realpathSync(root);
+    if (fm.markerPath(real) !== fm.markerPath(root)) roots.push(real);
+  } catch {
+    // no resolved spelling
+  }
+  return roots;
+}
+
+// The first trusted, fresh marker among the root's spellings (consumed), or null.
+function findFreshMarker(root) {
+  for (const r of rootSpellings(root)) {
+    const marker = consumeMarker(r);
+    if (marker && fm.markerFresh(marker.createdAt)) return marker;
+  }
+  return null;
+}
+
 function buildContext(input) {
   const source = typeof input.source === 'string' && input.source ? input.source : 'startup';
   const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : process.cwd();
@@ -227,8 +251,8 @@ function buildContext(input) {
   const handover = path.join(root, HANDOVER_FILE);
 
   if (source === 'clear') {
-    const marker = consumeMarker(root);
-    if (marker && fm.markerFresh(marker.createdAt) && isFile(handover)) {
+    const marker = findFreshMarker(root);
+    if (marker && isFile(handover)) {
       const text = fs.readFileSync(handover, 'utf8');
       return freshContext(handover, text);
     }
