@@ -273,3 +273,21 @@ verdict
 verified
 waiting
 ```
+
+## Amendments (rev 4)
+
+These amendments take precedence over the sections above where they differ.
+
+1. **Values from the helper.** `base`, `branch` and `start` are accepted only as git ref names made
+   of `[A-Za-z0-9._/-]` that do not begin with `-`. `worktree` is accepted only as an absolute path
+   with none of `"`, `$`, `` ` ``, `\`, `!` or control characters; spaces are fine. Any other value
+   blocks the task with a one-line reason. Values that must pass: `abc123`, `main`, `origin/main`,
+   `task/t/T1`, `/tmp/wt-T1`, `<root>/.claude/worktrees/<topic>-T1`.
+2. **Quoting in the reviewer prompt.** Every value inserted into a git command of the reviewer prompt
+   is quoted. The pinned ops prompt keeps its exact form.
+3. **Consistent review.** A task is merged only when all three review booleans are true and no
+   finding has severity `high`. Otherwise the task is blocked with the reason `review inconsistent`.
+4. **`stopped` text.** `result.stopped` is always a single line: whitespace runs collapse to one
+   space and the text is cut to at most 300 characters.
+5. **Glob block.** The block follows amendment 4 of the tasks-git spec (`..` anywhere overlaps
+   everything) and stays byte-identical with the helper's copy.

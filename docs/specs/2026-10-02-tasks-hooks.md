@@ -183,3 +183,14 @@ tool_input
 verification FAILED (exit
 ${CLAUDE_PLUGIN_ROOT}
 ```
+
+## Amendments (rev 4)
+
+These amendments take precedence over the sections above where they differ. They concern verify-gate.
+
+1. **Check could not start.** When the verify check cannot be started at all (a spawn error that is
+   not the timeout), the gate lets the stop through and leaves its state as it was.
+2. **State file.** The state file is written without following symbolic links, is read only when it
+   belongs to the current user, and its failure count is clamped to the range 0 to 3.
+3. **No session id.** When the hook input carries no session id, the gate does nothing.
+4. **One-line message.** The complete `systemMessage` value contains no line break.

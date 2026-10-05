@@ -103,8 +103,6 @@ function lastJsonObject(stdout) {
   return null;
 }
 
-// Commands that change ledger or git state run one at a time; `verify` changes neither and may
-// overlap with them.
 let opsChain = Promise.resolve();
 function serialised(fn) {
   const run = opsChain.then(fn, fn);
@@ -416,7 +414,6 @@ try {
       continue;
     }
     if (stopped !== null) break;
-    // Nothing is running: look for added tasks once more before ending.
     await syncTasks();
     if (![...tasks.values()].some(ready)) break;
   }

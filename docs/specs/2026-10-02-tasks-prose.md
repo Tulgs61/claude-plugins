@@ -283,3 +283,25 @@ verified
 worktree
 ${CLAUDE_PLUGIN_ROOT}
 ```
+
+## Amendments (rev 4)
+
+These amendments take precedence over the sections above where they differ.
+
+1. **Resume and retry with a live lock.** When the ledger's lock is fresh, the tasks skill shows the
+   lock's run id and age, and continues with `takeover` only once the user has confirmed that the
+   other run is dead.
+2. **Inbox lines.** When the skill appends a task to the inbox, the JSON never ends up inside a shell
+   string.
+3. **`topic`.** tasks-plan always writes `topic` (the slug from the ledger's file name) and checks it.
+4. **Overlap rule.** tasks-plan states the helper's overlap rule exactly as the helper implements it:
+   matching ignores case, `\` counts as `/`, a pattern is compared by its literal segment prefix up to
+   the first segment containing a glob character, and `..` anywhere in a pattern overlaps everything.
+5. **Reviewer is read-only.** The reviewer agent only inspects. It runs no command that can write,
+   so it runs no tests either.
+6. **Dispatch target.** The dispatch skill never names a permanent branch or the main checkout as the
+   place to commit.
+7. **Cleanup.** Cleanup leaves an integration branch alone when it was taken over, and deletes a
+   branch with `-D` only after its merge is confirmed.
+8. **Front-matter test.** A new `tests/frontmatter.test.mjs` pins the fixed front matter of every
+   agent and skill, and feeds the dispatch skill's label block through dispatch-guard.
