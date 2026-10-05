@@ -15,6 +15,8 @@ const { spawnSync } = require('node:child_process');
 const MAX_FAILURES = 3;
 const TIMEOUT_MS = 3 * 60 * 1000;
 const TAIL_CHARS = 4000;
+// The most output the hook accepts per stream; a check that produces more is ended and fails.
+const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 const VERIFY_REL = path.join('.claude', 'verify.cmd');
 
 // The session id is sanitised so the state file always lies directly in the temp directory.
@@ -157,12 +159,14 @@ function onStop(input, stateFile) {
     cwd: check.dir,
     encoding: 'utf8',
     timeout: TIMEOUT_MS,
-    maxBuffer: 64 * 1024 * 1024,
+    maxBuffer: MAX_OUTPUT_BYTES,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  // The check could not be started at all (no process was created): let the stop through and leave
+  // the state as it was. Any other error belongs to a started check and counts as a failed run.
+  if (result.error && !(result.pid > 0)) return 0;
   const timedOut = Boolean(result.error) && result.error.code === 'ETIMEDOUT';
-  // The check could not be started at all: let the stop through and leave the state as it was.
-  if (result.error && !timedOut) return 0;
+  const overflowed = Boolean(result.error) && result.error.code === 'ENOBUFS';
   if (result.status === 0 && !result.error) {
     removeState(stateFile);
     return 0;
@@ -170,6 +174,7 @@ function onStop(input, stateFile) {
 
   let code;
   if (timedOut) code = `timeout after ${TIMEOUT_MS / 1000}s`;
+  else if (overflowed) code = 'output limit exceeded';
   else if (result.status !== null && result.status !== undefined) code = String(result.status);
   else if (result.signal) code = result.signal;
   else code = 'unknown';
