@@ -317,3 +317,15 @@ These amendments take precedence over the sections above where they differ.
    ledger holds a different `topic` and any task has left `todo`/`blocked`, it stops and reports the
    mismatch instead of rewriting it; only a ledger where no task has run yet may get its `topic`
    corrected.
+
+## Amendments (rev 7)
+
+1. **`topic` correction only before the first run.** tasks-plan may correct or fill in `topic` only
+   when `runStatus` is `planned` or absent, every task is `todo` with `branch`, `base` and `worktree`
+   all null, and no `task/<stored topic>/` branch exists. In every other case it stops and reports the
+   mismatch. This replaces rev 5, amendment 2.
+2. **Unconfirmed proof is never acceptance.** When acceptance depends on the proof that only the
+   implementer ran, the reviewer does not set `acceptance_met` to true: it answers `needs_input`, or
+   sets `acceptance_met` to false.
+3. **Verify result only with evidence.** The reviewer relies on the `verify.cmd` result only when the
+   prompt includes its output tail; without it, verify is unconfirmed as well.

@@ -307,3 +307,12 @@ These amendments take precedence over the sections above where they differ.
    argument, so the helper refreshes the lock only while it still names this run (tasks-git rev 5,
    amendment 2). The ops prompt keeps its pinned form, with the run id as the one argument after
    `sync`.
+
+## Amendments (rev 7)
+
+1. **`start` is checked once.** Right after a successful `prepare`, the engine checks `start` (when
+   present). If it is invalid, the engine starts no agent: every task it would otherwise drive
+   (`todo` or `verified`) is blocked with a one-line reason, and `stopped` names the invalid `start`,
+   even when there is no task to drive. This replaces the per-task check of rev 5, amendment 1.
+2. **Run id on `finish`.** The engine passes its run id as the last argument of `finish`, so the
+   helper removes only this run's lock (tasks-git rev 7). The ops prompt keeps its pinned form.
