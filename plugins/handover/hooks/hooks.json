@@ -6,7 +6,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start-context.js\""
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/session-start-context.js"],
+            "timeout": 10
           }
         ]
       }
