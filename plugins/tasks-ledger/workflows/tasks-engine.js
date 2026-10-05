@@ -418,7 +418,8 @@ function start(t) {
 }
 
 async function syncTasks() {
-  const answer = await ops('sync');
+  // The run id lets the helper refresh the lock only while it still names this run.
+  const answer = await ops('sync', runId);
   if (answer.ok) learn(answer.tasks);
   else log(`sync failed: ${answer.error || 'unknown error'}`);
 }
