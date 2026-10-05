@@ -6,14 +6,23 @@
 // - compact / resume: remind to re-read the active plan and task ledger.
 // - every source but compact (and not after a fresh resume): hint at /pickup when HANDOVER.md exists.
 //
-// Fail-open: on bad input or any internal error it exits 0 and prints nothing.
-// Built-in modules only, no child processes.
+// Fail-open: on bad input or any internal error (a missing module, a closed stdout) it exits 0 and
+// prints nothing. Built-in modules only, no child processes.
+
+// Last-resort guard, installed before anything that can fail: swallow the error and keep exit 0.
+process.on('uncaughtException', () => {
+  process.exitCode = 0;
+});
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { markerPath, findRoot, markerTrusted, markerFresh, currentUid } = require(
-  path.join(__dirname, '..', 'scripts', 'fresh-marker.js'),
-);
+
+let fm = null;
+try {
+  fm = require(path.join(__dirname, '..', 'scripts', 'fresh-marker.js'));
+} catch {
+  // handled in main(): no module, no output
+}
 
 const HANDOVER_FILE = 'HANDOVER.md';
 const MAX_HANDOVER_CHARS = 4000;
@@ -32,7 +41,7 @@ function isFile(p) {
 // Opens the marker without following symlinks or blocking, checks trust on the opened file, reads it,
 // and deletes it when the current user owns it. Returns the parsed object when trusted, else null.
 function consumeMarker(root) {
-  const p = markerPath(root);
+  const p = fm.markerPath(root);
   const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
   let flags = O_RDONLY;
   if (typeof O_NOFOLLOW === 'number') flags |= O_NOFOLLOW;
@@ -58,7 +67,7 @@ function consumeMarker(root) {
   let text = null;
   try {
     stat = fs.fstatSync(fd);
-    if (markerTrusted(stat)) {
+    if (fm.markerTrusted(stat)) {
       const size = Math.min(stat.size, MAX_MARKER_BYTES);
       const buf = Buffer.alloc(size);
       let off = 0;
@@ -78,7 +87,7 @@ function consumeMarker(root) {
   // Delete a marker the current user owns, honoured or not, but only if the path still names the
   // file that was opened.
   if (stat && stat.isFile()) {
-    const uid = currentUid();
+    const uid = fm.currentUid();
     if (uid === null || stat.uid === uid) {
       try {
         const now = fs.lstatSync(p);
@@ -99,13 +108,20 @@ function consumeMarker(root) {
   }
 }
 
-// Preamble plus the kept `## ` sections, capped at MAX_HANDOVER_CHARS.
+// Preamble plus the kept `## ` sections, capped at MAX_HANDOVER_CHARS. A `## ` line inside a fenced
+// code block is content, not a heading.
 function reduceHandover(text) {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const out = [];
   let keep = true; // preamble
+  let fence = null; // opening fence run (e.g. "```" or "~~~~") while inside a code block
   for (const line of lines) {
-    if (/^## /.test(line)) {
+    const f = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence) {
+      if (f && f[1][0] === fence[0] && f[1].length >= fence.length && f[2].trim() === '') fence = null;
+    } else if (f && !(f[1][0] === '`' && f[2].includes('`'))) {
+      fence = f[1];
+    } else if (/^## /.test(line)) {
       const title = line.slice(3).trim();
       keep = KEPT_SECTIONS.some(s => title.startsWith(s));
     }
@@ -207,12 +223,12 @@ function freshContext(handover, text) {
 function buildContext(input) {
   const source = typeof input.source === 'string' && input.source ? input.source : 'startup';
   const cwd = typeof input.cwd === 'string' && input.cwd ? input.cwd : process.cwd();
-  const root = findRoot(cwd);
+  const root = fm.findRoot(cwd);
   const handover = path.join(root, HANDOVER_FILE);
 
   if (source === 'clear') {
     const marker = consumeMarker(root);
-    if (marker && markerFresh(marker.createdAt) && isFile(handover)) {
+    if (marker && fm.markerFresh(marker.createdAt) && isFile(handover)) {
       const text = fs.readFileSync(handover, 'utf8');
       return freshContext(handover, text);
     }
@@ -230,6 +246,7 @@ function buildContext(input) {
 }
 
 function main() {
+  if (!fm) return;
   let input;
   try {
     input = JSON.parse(fs.readFileSync(0, 'utf8'));
@@ -239,6 +256,8 @@ function main() {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return;
   const ctx = buildContext(input);
   if (!ctx) return;
+  // A closed stdout reports EPIPE/EBADF asynchronously; ignore it instead of crashing.
+  process.stdout.on('error', () => {});
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: ctx },
   }));

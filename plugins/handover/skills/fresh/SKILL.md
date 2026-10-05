@@ -26,11 +26,14 @@ the SessionStart hook hands that file to the new session, which picks the work u
    - base the recorded state on commands you run, and leave out forge checks when neither `gh` nor
      `glab` is installed;
    - keep secrets and customer data out, and leave the file uncommitted.
-3. **Set the marker** for that root:
+3. **Set the marker.** Run the script without a directory argument:
 
    ```bash
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/fresh-marker.js" "<root>"
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/fresh-marker.js"
    ```
+
+   The script works from its own process working directory, which is the session's project
+   directory, and arms the marker for the repository root containing it. Do not `cd` elsewhere first.
 
    A non-zero exit means the marker was not set. Pass the script's error output on to the user and
    explain that the handover will not load by itself after the clear; they can call `/pickup` once

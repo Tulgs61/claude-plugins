@@ -3,7 +3,7 @@
 // One-shot marker for the /fresh skill.
 //
 // As a command, `node fresh-marker.js [dir]` arms the marker for the repository containing `dir`
-// (default: the working directory). As a module, it gives the SessionStart hook the helpers it needs
+// (default: the process working directory; the fresh skill passes no argument). As a module, it gives the SessionStart hook the helpers it needs
 // to locate and judge a marker. Built-in modules only, no child processes.
 //
 // The marker lives in os.tmpdir(), which other local users may be able to write to, so it is written
@@ -53,10 +53,11 @@ function currentUid() {
   return typeof process.getuid === 'function' ? process.getuid() : null;
 }
 
+// An omitted or undefined uid means the current user; only an explicit null disables the checks.
 function markerTrusted(stat, uid) {
-  if (arguments.length < 2) uid = currentUid();
+  if (uid === undefined) uid = currentUid();
   if (!stat || typeof stat.isFile !== 'function' || !stat.isFile()) return false;
-  if (uid === null || uid === undefined) return true;
+  if (uid === null) return true;
   if (stat.uid !== uid) return false;
   return (Number(stat.mode) & 0o022) === 0;
 }
@@ -93,8 +94,25 @@ function armMarker(root, now = Date.now()) {
   return target;
 }
 
+// The process working directory, spelled as the shell knows it: $PWD when it names the same directory
+// as process.cwd() (which has symlinks resolved), so the root matches the hook's lexical findRoot().
+function workingDir() {
+  const cwd = process.cwd();
+  const pwd = process.env.PWD;
+  if (pwd && path.isAbsolute(pwd) && pwd !== cwd) {
+    try {
+      const a = fs.statSync(pwd);
+      const b = fs.statSync(cwd);
+      if (a.dev === b.dev && a.ino === b.ino) return pwd;
+    } catch {
+      // fall back to process.cwd()
+    }
+  }
+  return cwd;
+}
+
 function main(argv) {
-  const dir = path.resolve(argv[0] || process.cwd());
+  const dir = path.resolve(argv[0] || workingDir());
   let st;
   try {
     st = fs.statSync(dir);
