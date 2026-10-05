@@ -3,8 +3,9 @@
 // One-shot marker for the /fresh skill.
 //
 // As a command, `node fresh-marker.js [dir]` arms the marker for the repository containing `dir`
-// (default: the process working directory; the fresh skill passes no argument). As a module, it gives the SessionStart hook the helpers it needs
-// to locate and judge a marker. Built-in modules only, no child processes.
+// (default: the process working directory; the fresh skill passes no argument, and the marker is then
+// armed under the root with symlinks resolved). As a module, it gives the SessionStart hook the
+// helpers it needs to locate and judge a marker. Built-in modules only, no child processes.
 //
 // The marker lives in os.tmpdir(), which other local users may be able to write to, so it is written
 // atomically with mode 0600 and the reader treats it as untrusted input.
@@ -69,13 +70,11 @@ function markerFresh(createdAt, now = Date.now()) {
   return age >= 0 && age < MARKER_MAX_AGE_MS;
 }
 
-// Writes the marker under a random name in the same directory, then renames it over the final path.
+// Writes `body` under a random name in the same directory, then renames it over `target`.
 // rename() replaces a symlink at the target instead of following it.
-function armMarker(root, now = Date.now()) {
-  const target = markerPath(root);
+function writeMarkerFile(target, body) {
   const dir = path.dirname(target);
   const tmp = path.join(dir, `.${path.basename(target)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
-  const body = JSON.stringify({ createdAt: now }) + '\n';
   let fd;
   try {
     fd = fs.openSync(tmp, 'wx', 0o600);
@@ -91,7 +90,29 @@ function armMarker(root, now = Date.now()) {
     try { fs.unlinkSync(tmp); } catch { /* ignore */ }
     throw err;
   }
+}
+
+// Arms the marker for `root`. With `aliases` (other spellings of the same root), the same marker is
+// also armed under each alias, and every copy lists all spellings in `roots`, so the hook can use up
+// all of them when it honours one. Returns the marker path for `root`.
+function armMarker(root, now = Date.now(), aliases = []) {
+  const target = markerPath(root);
+  const others = aliases.filter(a => markerPath(a) !== target);
+  const data = { createdAt: now };
+  if (others.length) data.roots = [root, ...others];
+  const body = JSON.stringify(data) + '\n';
+  writeMarkerFile(target, body);
+  for (const a of others) writeMarkerFile(markerPath(a), body);
   return target;
+}
+
+// The root with symlinks resolved, or the root itself when it cannot be resolved.
+function resolvedRoot(root) {
+  try {
+    return fs.realpathSync(root);
+  } catch {
+    return root;
+  }
 }
 
 // The process working directory, spelled as the shell knows it: $PWD when it names the same directory
@@ -126,7 +147,9 @@ function main(argv) {
   }
   const root = findRoot(dir);
   try {
-    const target = armMarker(root);
+    // Without an argument the marker is armed under the root with symlinks resolved, whatever
+    // spelling the working directory has; the shell's spelling gets the same marker as an alias.
+    const target = argv[0] ? armMarker(root) : armMarker(resolvedRoot(root), Date.now(), [root]);
     process.stdout.write(`fresh marker armed for ${root} (${target})\n`);
     return 0;
   } catch (err) {
@@ -143,6 +166,7 @@ module.exports = {
   markerTrusted,
   markerFresh,
   armMarker,
+  resolvedRoot,
   currentUid,
 };
 

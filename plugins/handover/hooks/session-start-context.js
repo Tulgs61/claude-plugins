@@ -4,7 +4,7 @@
 //
 // - clear + trusted, fresh /fresh marker + HANDOVER.md: inject the handover essentials once. The
 //   marker is looked up under the lexical root and, failing that, under the root with symlinks
-//   resolved.
+//   resolved. Honouring it uses up the marker under every spelling of the root.
 // - compact / resume: remind to re-read the active plan and task ledger.
 // - every source but compact (and not after a fresh resume): hint at /pickup when HANDOVER.md exists.
 //
@@ -235,11 +235,41 @@ function rootSpellings(root) {
   return roots;
 }
 
-// The first trusted, fresh marker among the root's spellings (consumed), or null.
+function sameDir(a, b) {
+  try {
+    const x = fs.statSync(a);
+    const y = fs.statSync(b);
+    return x.isDirectory() && x.dev === y.dev && x.ino === y.ino;
+  } catch {
+    return false;
+  }
+}
+
+// The spellings a marker lists in `roots` that name the same directory as `root`.
+function markerRoots(marker, root) {
+  if (!Array.isArray(marker.roots)) return [];
+  return marker.roots
+    .slice(0, 8)
+    .filter(r => typeof r === 'string' && path.isAbsolute(r) && sameDir(r, root));
+}
+
+// The first trusted, fresh marker among the root's spellings, or null. The winner is consumed, and so
+// is a marker of the same root under any other spelling (the resolved one, or one the marker lists
+// that names the same directory), with the same ownership and same-file checks, so it works only once
+// whatever the spelling.
 function findFreshMarker(root) {
-  for (const r of rootSpellings(root)) {
+  const spellings = rootSpellings(root);
+  for (const r of spellings) {
     const marker = consumeMarker(r);
-    if (marker && fm.markerFresh(marker.createdAt)) return marker;
+    if (!marker || !fm.markerFresh(marker.createdAt)) continue;
+    const used = new Set([fm.markerPath(r)]);
+    for (const other of [...spellings, ...markerRoots(marker, root)]) {
+      const p = fm.markerPath(other);
+      if (used.has(p)) continue;
+      used.add(p);
+      consumeMarker(other);
+    }
+    return marker;
   }
   return null;
 }
