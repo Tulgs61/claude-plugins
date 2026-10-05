@@ -305,3 +305,15 @@ These amendments take precedence over the sections above where they differ.
    branch with `-D` only after its merge is confirmed.
 8. **Front-matter test.** A new `tests/frontmatter.test.mjs` pins the fixed front matter of every
    agent and skill, and feeds the dispatch skill's label block through dispatch-guard.
+
+## Amendments (rev 5)
+
+1. **What the reviewer is given.** The reviewer agent is told that the workflow re-ran only
+   `.claude/verify.cmd` (its output tail is in the prompt) and that the task's proof was run only by
+   the implementer, so its outcome is unconfirmed. The reviewer judges acceptance from the diff and
+   the code; when acceptance can only be shown by running the proof, it answers `needs_input` or
+   records a finding instead of assuming the proof passed.
+2. **`topic` on refresh.** tasks-plan fills in a missing `topic` from the file name. When an existing
+   ledger holds a different `topic` and any task has left `todo`/`blocked`, it stops and reports the
+   mismatch instead of rewriting it; only a ledger where no task has run yet may get its `topic`
+   corrected.

@@ -194,3 +194,10 @@ These amendments take precedence over the sections above where they differ. They
    belongs to the current user, and its failure count is clamped to the range 0 to 3.
 3. **No session id.** When the hook input carries no session id, the gate does nothing.
 4. **One-line message.** The complete `systemMessage` value contains no line break.
+
+## Amendments (rev 5)
+
+1. **"Could not start" is narrow.** Only a check for which no process was created counts as "could
+   not start" (rev 4, amendment 1). A check that started and was ended for producing more output than
+   the hook accepts counts as a failed run, with the exit label `output limit exceeded`; it blocks
+   and counts towards giving up like any other failure.

@@ -291,3 +291,12 @@ These amendments take precedence over the sections above where they differ.
    space and the text is cut to at most 300 characters.
 5. **Glob block.** The block follows amendment 4 of the tasks-git spec (`..` anywhere overlaps
    everything) and stays byte-identical with the helper's copy.
+
+## Amendments (rev 5)
+
+1. **`start` is always checked.** Whenever `prepare` returns a `start` value, it must satisfy the
+   ref-name rule of amendment 1 (rev 4), independent of whether a task uses it as its diff base. An
+   invalid `start` blocks every task the run would drive, each with a one-line reason.
+2. **`..` in ref names** is rejected, as git itself rejects it.
+3. **Tests** cover an invalid `start` for a task whose base begins with `task/`, a `stopped` text
+   coming from unfinished tasks, and that the reason passed to `finish` has no line break.
