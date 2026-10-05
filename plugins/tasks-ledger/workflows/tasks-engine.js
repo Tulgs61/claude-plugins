@@ -14,6 +14,10 @@ const AGENT_NAME = /^[A-Za-z0-9:_-]+$/;
 const RUN_ID = /^[A-Za-z0-9-]{4,64}$/;
 const TASK_ID = /^T[0-9]+$/;
 const OPS_ATTEMPTS = 3;
+// Values the helper hands back before they go into prompts and command lines.
+const GIT_REF = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/;
+const UNSAFE_PATH = /["$`\\!]|[\u0000-\u001f\u007f]/;
+const STOPPED_MAX = 300;
 
 // ---- arguments (all checks happen before the first agent call) ---------------------------------
 
@@ -25,7 +29,7 @@ function requirePath(key) {
     throw new Error(`args.${key} is required and must be an absolute path`);
   }
   // The path is double-quoted on the command line; refuse everything bash still expands there.
-  if (/["$`\\!]|[\u0000-\u001f\u007f]/.test(value)) {
+  if (UNSAFE_PATH.test(value)) {
     throw new Error(`args.${key} contains characters that are not safe on a command line`);
   }
   return value;
@@ -62,6 +66,14 @@ function quoteText(text, max = 600) {
     .slice(0, max)
     .trim();
   return `"${safe || '-'}"`;
+}
+
+const isGitRef = value => typeof value === 'string' && GIT_REF.test(value);
+const isSafePath = value => typeof value === 'string' && value.startsWith('/') && !UNSAFE_PATH.test(value);
+
+// `result.stopped` is always one line of at most STOPPED_MAX characters.
+function oneLine(reason) {
+  return String(reason).replace(/\s+/g, ' ').trim().slice(0, STOPPED_MAX).trim();
 }
 
 const OPS_SCHEMA = {
@@ -256,8 +268,8 @@ function reviewerPrompt(t, place, diffBase, verifyTail) {
     `Review task ${t.id} of a tasks-ledger run: ${text(t.title)}`,
     '',
     `The change is in the git worktree ${place.worktree} on branch ${place.branch}.`,
-    `Inspect it there, read-only: \`git -C "${place.worktree}" log --oneline ${diffBase}..HEAD\` and`,
-    `\`git -C "${place.worktree}" diff ${diffBase}...HEAD\`. Do not edit, commit, push or merge anything.`,
+    `Inspect it there, read-only: \`git -C "${place.worktree}" log --oneline "${diffBase}..HEAD"\` and`,
+    `\`git -C "${place.worktree}" diff "${diffBase}...HEAD"\`. Do not edit, commit, push or merge anything.`,
     '',
     'The workflow already re-ran `.claude/verify.cmd` in that worktree and it passed. Output tail:',
     '```',
@@ -290,7 +302,7 @@ if (!prepared.ok) {
   return {
     locked: Boolean(prepared.locked),
     results: [],
-    stopped: `prepare failed: ${prepared.error || 'unknown error'}`,
+    stopped: oneLine(`prepare failed: ${prepared.error || 'unknown error'}`),
   };
 }
 
@@ -342,6 +354,11 @@ async function driveTask(t) {
 
   const place = await ops('worktree', t.id);
   if (!place.ok) return block(t, `worktree failed: ${place.error || 'unknown error'}`);
+  if (!isSafePath(place.worktree)) return block(t, 'worktree failed: the helper returned an unsafe worktree path');
+  if (!isGitRef(place.branch)) return block(t, 'worktree failed: the helper returned an invalid branch name');
+  if (!isGitRef(place.base)) return block(t, 'worktree failed: the helper returned an invalid base ref');
+  const diffBase = place.base.startsWith('task/') ? place.base : prepared.start || place.base;
+  if (!isGitRef(diffBase)) return block(t, 'prepare returned an invalid start ref');
 
   if ((await agent(implementerPrompt(t, place), { agentType: implementerType })) == null) {
     return block(t, 'the implementer did not finish');
@@ -356,7 +373,6 @@ async function driveTask(t) {
     if (!checked.ok) return block(t, `verification failed twice: ${checked.error}`);
   }
 
-  const diffBase = String(place.base || '').startsWith('task/') ? place.base : prepared.start || place.base;
   const review = await agent(reviewerPrompt(t, place, diffBase, checked.tail), {
     agentType: reviewerType,
     schema: REVIEW_SCHEMA,
@@ -369,6 +385,12 @@ async function driveTask(t) {
       .join('; ');
     return block(t, `review ${review.verdict || 'without verdict'}: ${findings || text(review.evidence) || 'no details'}`);
   }
+  const consistent =
+    review.acceptance_met === true &&
+    review.scope_ok === true &&
+    review.constraints_ok === true &&
+    !list(review.findings).some(f => f && f.severity === 'high');
+  if (!consistent) return block(t, 'review inconsistent');
 
   const marked = await ops('status', t.id, 'verified', quoteText(`review verified: ${text(review.evidence)}`, 2000));
   if (!marked.ok) return block(t, `could not record verified: ${marked.error || 'unknown error'}`);
@@ -435,6 +457,7 @@ if (stopped === null && prepared.prs === true) {
   prsResult = list(prs.results);
   if (!prs.ok) stopped = `prs failed: ${prs.error || 'unknown error'}`;
 }
+if (stopped !== null) stopped = oneLine(stopped);
 
 const finished = stopped === null
   ? await ops('finish', 'finished')
