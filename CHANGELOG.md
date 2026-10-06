@@ -68,13 +68,16 @@ version `<version>` is tagged `<name>--v<version>`.
 
 #### Fixed
 
-- A carry-over write that fails partway is undone, unless another writer appended to the inbox in the
-  meantime; the warning then says the inbox may hold part of the lines, and, when lines may have been
-  joined, names the inbox to check.
+- A carry-over that cannot be written no longer fails `sync` or `prepare`, and no longer makes `prepare`
+  roll back the run lock after the ledger was written: the answer stays successful and warns.
+- A carry-over write that fails partway is undone. When another writer appended to the inbox in the
+  meantime, or the truncation itself fails, the inbox is left as it is and the warning says it may hold
+  part of the lines; when another writer's lines may have been joined to them, it also names the inbox
+  to check.
 - When a failed `prepare` cannot restore the previous lock, the answer keeps the original error, adds the
   restore error, and says when the lock still holds the failed call's text. Before, the restore error
   could replace the original one.
-- Errors from closing the inbox no longer turn a successful `sync` into a failure.
+- Errors from closing the inbox no longer turn a successful `sync` or `prepare` into a failure.
 
 ### [0.4.0] - 2026-10-06
 
