@@ -447,3 +447,161 @@ builds on it.
     Tests: a repository whose `.git` file points at an approved repository's git directory, with the same
     `verify.cmd`, does not run the check and shows the approval request; a real linked worktree of an
     approved repository still runs it; a forged `commondir` is ignored.
+
+## Amendments (rev 11)
+
+These amendments take precedence over every earlier section and amendment where they differ. They
+concern verify-gate and `scripts/verify-consent.js`. dispatch-guard is unchanged.
+
+1. **The default store is pinned too.** For the `~/.claude` default, the approval request's command
+   sets `CLAUDE_PLUGIN_DATA=` (empty) and `CLAUDE_CONFIG_DIR='<home>/.claude'`. `<home>` is the home
+   directory the gate itself resolved when it chose the store (`os.homedir()` in the hook process),
+   shell-quoted as in rev 10, amendment 19. So the command records into the file the gate reads, even
+   when the terminal's `HOME` differs from the hook's. This replaces "both empty for the default" in
+   rev 10, amendment 27.
+   - The consent script resolves `CLAUDE_CONFIG_DIR='<home>/.claude'` to
+     `<home>/.claude/tasks-ledger/verify-consent.json`, which is the default store's file. The store
+     rules of rev 10, amendment 9 are unchanged.
+   - The control-character rule (rev 10, amendments 19 and 28) now also covers the default store's
+     path, which is named "the consent store".
+2. **Approve on a real terminal is tested.** `approve` is tested end to end on a pseudo-terminal
+   on POSIX, so that the real `openTerminal` (opening `/dev/tty`, the synchronous write loop, the
+   byte-wise read) runs without the module seam. No behaviour changes.
+3. **The POSIX command names its shell and avoids the backslashes shells read differently.** Native Windows is
+   unchanged (it still cannot record an approval). On every other platform:
+   - the request says the command is for a POSIX shell such as bash or zsh;
+   - when one of the quoted paths (the consent script, the store value, the directory) contains a
+     backslash, no command is offered. The request names which path it is, as rev 10, amendment 28
+     does for control characters, and says that it contains a backslash, which shells quote
+     differently.
+   With no backslash in any quoted path, the POSIX quoting of rev 10, amendment 19 gives the same
+   result in fish. This amendment does not otherwise claim support for any particular shell.
+4. **An approval covers one check directory.** A store entry is the triple (repository identity,
+   check directory, sha256). The *check directory* is the path of the directory that contains `.claude/`,
+   relative to the top level of its checkout, with `/` separators. The top level is the nearest ancestor
+   holding a `.git` entry, the same walk the gate uses. Outside a repository it is `''`.
+   - An entry for the top level has no `dir` key. An entry for any other directory has
+     `dir: "<relative path>"`. An entry without `dir` is read as `''`. So existing stores keep approving
+     exactly the top-level check they approved, and stores written before this change remain valid.
+   - The gate runs a check only when (identity, check directory, hash) is in the store. An identical
+     `verify.cmd` in another directory of the same repository is unapproved and gets the approval
+     request.
+   - Linked worktrees share the identity (rev 10, amendments 9 and 32), and the check directory is
+     relative to each checkout's own top level. So an approval of `<main>/pkg` also covers
+     `<worktree>/pkg`.
+   - `approve <dir>` records the triple. `revoke <dir>` still removes every entry for the identity,
+     whatever the directory. `list` prints `<identity>\t<hash12>` for a top-level entry, as now, and
+     `<identity>\t<hash12>\t<dir>` for others.
+   - A `dir` value that is absolute, empty when present, contains `..` as a segment, or contains a
+     control character makes that entry invalid. It is skipped like any other invalid entry.
+5. **Tests**, in new test files. Each test must be able to fail on the commit before the change, unless
+   it is marked as coverage.
+   - `plugins/tasks-ledger/tests/hooks-verify-consent-default-rev11.test.mjs`:
+     - **Default store pinned (amendment 1).** Run the gate with `CLAUDE_PLUGIN_DATA` and
+       `CLAUDE_CONFIG_DIR` unset and `HOME` set to a temporary directory A, on an unapproved check. Take
+       the printed command, parse its assignments, and run `approve` through the module seam with
+       `HOME` set to a different temporary directory B plus the parsed assignments, answering `yes`.
+       Assert: the entry is in `A/.claude/tasks-ledger/verify-consent.json`, and no store exists under
+       B. POSIX only.
+     - **Control characters in the default store (amendment 1).** `HOME` with a line feed in its name:
+       no command is offered, and the request names the consent store.
+   - `plugins/tasks-ledger/tests/hooks-verify-consent-pty-rev11.test.mjs` (amendment 2, coverage, POSIX
+     only). Drive the real script, `node scripts/verify-consent.js approve <dir>`, on a pseudo-terminal
+     that it holds as its controlling terminal. Use Python's standard `pty` module (`pty.fork()`)
+     through a small driver in `plugins/tasks-ledger/tests/helpers/pty-drive.py`. The driver reads the
+     terminal until the question appears, then writes the answer or closes the terminal, and reports
+     the terminal output and the exit status. `CLAUDE_PLUGIN_DATA` points at a temporary directory.
+     - answer `yes`: exit 0; one entry recorded; the terminal output contains the file path, every
+       `| ` line, the line count and the 12-digit hash, all before the question; a `verify.cmd` holding
+       an escape sequence shows it as `\x1b` on the terminal;
+     - answer `no`: exit 1; nothing recorded;
+     - the terminal is closed after the question (hangup): the process ends within 10 seconds, its exit
+       is non-zero or by a signal, and nothing is recorded.
+     - The test is skipped when no `python3` with a working `pty` module is found. When the environment
+       variable `CI` is set, it fails instead of skipping, so CI cannot pass it silently.
+   - `plugins/tasks-ledger/tests/hooks-verify-consent-shells-rev11.test.mjs`. POSIX only.
+     - **Backslash (amendment 3).** A repository directory whose name contains a backslash: on POSIX
+       the request offers no command and names the repository directory. A directory without one: the
+       request names a POSIX shell.
+   - `plugins/tasks-ledger/tests/hooks-verify-consent-dir-rev11.test.mjs` (amendment 4):
+     - approve the top-level check; an identical `verify.cmd` in `<repo>/sub/.claude/`, with the stop's
+       `cwd` in `sub`, is not run and shows the request; after approving `sub`, it runs;
+     - a store entry without `dir` (old format) still approves the top-level check and no other;
+     - an approval of `<main>/pkg` runs the same check in `<linked worktree>/pkg`;
+     - `list` prints the third column only for entries with a non-empty directory;
+     - entries with `dir` set to `/abs`, `../x`, `a/../b` or `''` are ignored.
+   - **Kept tests.** These kept files may be changed, and only in these respects:
+     - `plugins/tasks-ledger/tests/hooks-verify-consent-final-rev10.test.mjs`. In the test
+       "amendment 27 / 30: for the ~/.claude default, the pasted command empties both store variables",
+       the expected prefix becomes `CLAUDE_PLUGIN_DATA= CLAUDE_CONFIG_DIR='<home>/.claude' ` (amendment 1),
+       and the test title may say so. In the test "amendment 25 / 30: the consent script never runs a
+       git from the repository", the expected store entry gains `dir: 'pkg'` (amendment 4).
+     - `plugins/tasks-ledger/tests/hooks-verify-consent-review-rev10.test.mjs`. The assertion that the
+       plain command starts with `CLAUDE_PLUGIN_DATA= CLAUDE_CONFIG_DIR= node '…'` uses the pinned
+       default prefix of amendment 1.
+     - `plugins/tasks-ledger/tests/helpers/verify-consent.mjs`. `approveCheck` adds `dir` for a check
+       directory below the top level, computed independently of the scripts under test (relative to the
+       nearest ancestor holding `.git`). Root-level entries stay `{ repo, sha256 }`.
+     Any other kept assertion that fails because of the "POSIX shell" wording, or because a kept test
+     approves a check below its repository's top level, is reported by the implementer instead of being
+     changed.
+6. **README.** The consent section of `plugins/tasks-ledger/README.md` (and the root README's
+   `.claude/verify.cmd` opt-in section) states: the printed command pins the store; it is for a POSIX
+   shell, and paths with a backslash get no command; native Windows still cannot record an approval; an approval covers one check directory.
+7. **Fix round.** These sharpen amendments 1, 3 and 4.
+   - **Backslash rule, exact form.** Amendment 3's refusal applies to a backslash in a quoted path that is
+     followed by another backslash or a single quote, or that ends the path. Those are the only
+     backslashes fish reads as escapes inside single quotes, so the offered command means the same in
+     bash, zsh and fish. Any other backslash (for example `a\b`) is kept and the command is offered.
+     The `'\''` sequence that POSIX quoting uses for an embedded single quote is part of the quoting,
+     not of a path, and is read the same way in those shells. The shells test adds an `a\b` directory,
+     which gets a command.
+   - **Invalid check directory on approve.** When the check directory that `approve` computes would be
+     rejected as a stored `dir` (amendment 4: absolute, `..` segment, or a control character), `approve`
+     records nothing, exits 2 and says the directory cannot be approved and why.
+   - **Absolute default store.** The pinned default store of amendment 1 is the absolute path of
+     `<home>/.claude`, resolved in the hook process. When the home directory is not absolute, no
+     command is offered and the request says so.
+   - **Tests**, added to the rev 11 test files: an `a\b` directory gets a command; `approve` in a check
+     directory whose relative path holds a control character exits 2 and records nothing (POSIX only);
+     a relative `HOME` gets no command.
+   - **Kept test title.** In `plugins/tasks-ledger/tests/hooks-verify-consent-review-rev10.test.mjs`, the
+     title of the test whose prefix assertion amendment 5 changed may be changed to match it.
+8. **Fix round 2.** These sharpen amendments 1, 2, 5 and 7.
+   - **The store location must be absolute.** The value that selects the store (rev 10, amendment 9) is
+     `CLAUDE_PLUGIN_DATA`, else `CLAUDE_CONFIG_DIR`, else the home directory the process resolved. When
+     that value is not an absolute path, the store is unavailable: it is never resolved against the
+     working directory, so a file inside a repository can never act as the store.
+     - The gate then sees no approvals. An unapproved check gets the approval request, which offers no
+       command and says that the consent store's location is not an absolute path, naming the variable
+       (`CLAUDE_PLUGIN_DATA`, `CLAUDE_CONFIG_DIR` or the home directory). This replaces the message of
+       amendment 7's "Absolute default store" for that case.
+     - `approve`, `revoke` and `list` record nothing, change nothing, exit 2 and say the same.
+     - An empty variable still counts as unset, as before.
+   - **The pty driver hangs up only after the question.** In `plugins/tasks-ledger/tests/helpers/pty-drive.py`,
+     `hangup` closes the terminal only once the question has appeared, as `answer:` already does. When the
+     question never appears, the driver kills the program and reports `timedOut: true` and `asked: false`.
+   - **Tests**, added to `plugins/tasks-ledger/tests/hooks-verify-consent-default-rev11.test.mjs`. POSIX only.
+     Each must be able to fail on the commit before this change.
+     - For each of a relative `HOME` (with `CLAUDE_PLUGIN_DATA` and `CLAUDE_CONFIG_DIR` unset), a relative
+       `CLAUDE_CONFIG_DIR` (with `CLAUDE_PLUGIN_DATA` unset) and a relative `CLAUDE_PLUGIN_DATA`: the
+       repository holds, at the path that value would resolve to from the repository's top level, a store
+       file owned by the current user that approves the repository's own `verify.cmd`. The gate runs with
+       its working directory at the repository's top level. Assert: the check does not run, the request
+       is shown, it offers no command, and it names the variable.
+     - `approve` with a relative `CLAUDE_PLUGIN_DATA` exits 2 and creates no file under its working
+       directory.
+   - **Kept tests.** In `plugins/tasks-ledger/tests/hooks-verify-consent-final-rev10.test.mjs`, the test of
+     amendment 5 that may change its prefix may also change `assert.equal(rec.configDir, …)` to expect the
+     pinned `<home>/.claude` value. That follows from amendment 1. No other kept assertion may change.
+   - **Release note.** The changelog entry of the release that adds per-directory approvals says that going
+     back to an earlier version widens them: an earlier version reads an entry with `dir` as a top-level
+     approval of the same hash in any directory of the repository, and rewrites it without `dir`.
+9. **Coverage for fix round 2.** Tests only, all marked as coverage, POSIX only. No behaviour changes.
+   - In `plugins/tasks-ledger/tests/hooks-verify-consent-default-rev11.test.mjs`: `revoke <repo>` and `list`,
+     each with a relative `CLAUDE_PLUGIN_DATA` and run from a working directory that already holds a store
+     file at the path that value would resolve to. Assert: exit 2, a message on stderr that names
+     `CLAUDE_PLUGIN_DATA`, and the store file byte for byte unchanged.
+   - In `plugins/tasks-ledger/tests/hooks-verify-consent-pty-rev11.test.mjs`: `approve` in a directory with
+     no `.claude/verify.cmd`, driven with `hangup`. Assert: the driver reports `asked: false` and
+     `timedOut: true`, and nothing is recorded. The skip and `CI` rules of amendment 5 apply.

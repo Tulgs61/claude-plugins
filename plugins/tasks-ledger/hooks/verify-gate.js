@@ -7,7 +7,7 @@
 //   between cwd and its repository root.
 // State is kept per session and project; a project is the nearest ancestor of the real path that
 // contains .git (so a linked worktree is its own project), or the real path of the event's cwd.
-// A check only runs after that exact command was approved for its repository with
+// A check only runs after that exact command was approved for its repository and check directory with
 // scripts/verify-consent.js; the gate itself never records consent.
 // Exit 2 blocks (stderr goes to Claude), exit 0 allows. Fails open on any error.
 // The check always follows the hook input's `cwd`; CLAUDE_PROJECT_DIR is ignored on purpose.
@@ -404,32 +404,52 @@ function shellQuote(text) {
 
 // Line breaks and other control characters, and invisible format characters.
 const CONTROL_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+// A backslash that some shells (fish) read as an escape inside single quotes once the path is quoted: one
+// before another backslash or a single quote, or at the end, where it meets the closing quote.
+const QUOTED_BACKSLASH = /\\(?=[\\']|$)/;
 
 // The request to approve the check in `dir`. The approve command is copy-safe: it pins the store the gate
 // reads by setting the store variables explicitly (the one that chose the store with its value, each
-// higher-priority one empty, both empty for the ~/.claude default), so it records into that store whatever
-// the terminal exports; every path in it is shell-quoted, so pasting it into a POSIX shell runs nothing but
-// node on the consent script. A path with control characters is not offered as a command at all, and the
-// request names which path it is.
+// higher-priority one empty; for the ~/.claude default, CLAUDE_CONFIG_DIR is the absolute <home>/.claude this
+// process resolved), so it records into that store whatever the terminal exports and whatever its HOME is. A
+// store whose location is not an absolute path is unavailable and gets no command.
+// Every path in it is shell-quoted, so pasting it into a POSIX shell runs nothing but node on the consent
+// script. A path with control characters, or (outside Windows) with a backslash that shells quote
+// differently (QUOTED_BACKSLASH), is not offered as a command at all, and the request names which path it is.
 function approvalRequest(dir) {
   const consent = require(CONSENT_SCRIPT);
   const text = `verify-gate: ${consent.shownPath(path.join(dir, VERIFY_REL))} was not run because this command ` +
     'is not approved for this repository. ';
   const store = consent.storeSelection();
-  const paths = [['the plugin directory', PLUGIN_ROOT, CONSENT_SCRIPT], ['the repository directory', dir, dir]];
-  if (store.name) paths.splice(1, 0, ['the consent store', store.file, store.value]);
-  const bad = paths.filter(([, , p]) => CONTROL_CHARS.test(p));
-  if (bad.length > 0) {
-    const named = bad.map(([what, shown]) => `${what} (${consent.shownPath(shown)})`);
-    const list = named.length === 1 ? named[0] : `${named.slice(0, -1).join(', ')} and ${named[named.length - 1]}`;
-    return `${text}The path of ${list} contains control characters, so no approve command is offered; move or ` +
-      'rename it, then approve the check with scripts/verify-consent.js in a terminal.';
+  // A store whose location is not an absolute path is unavailable, and no command can pin it.
+  if (store.file === null) {
+    return `${text}${store.unavailable[0].toUpperCase()}${store.unavailable.slice(1)} and no approve command is offered; ` +
+      'set it to an absolute path, then approve the check with scripts/verify-consent.js in a terminal.';
   }
-  let assign = '';
-  if (store.name === 'CLAUDE_PLUGIN_DATA') assign = `CLAUDE_PLUGIN_DATA=${shellQuote(store.value)} `;
-  else if (store.name === 'CLAUDE_CONFIG_DIR') assign = `CLAUDE_PLUGIN_DATA= CLAUDE_CONFIG_DIR=${shellQuote(store.value)} `;
-  else assign = 'CLAUDE_PLUGIN_DATA= CLAUDE_CONFIG_DIR= ';
-  return `${text}To approve it, run this yourself in a terminal (it must be run in a terminal): ` +
+  const paths = [
+    ['the plugin directory', PLUGIN_ROOT, CONSENT_SCRIPT],
+    ['the consent store', store.file, store.value],
+    ['the repository directory', dir, dir],
+  ];
+  const naming = bad => {
+    const named = bad.map(([what, shown]) => `${what} (${consent.shownPath(shown)})`);
+    return named.length === 1 ? named[0] : `${named.slice(0, -1).join(', ')} and ${named[named.length - 1]}`;
+  };
+  const control = paths.filter(([, , p]) => CONTROL_CHARS.test(p));
+  if (control.length > 0) {
+    return `${text}The path of ${naming(control)} contains control characters, so no approve command is offered; ` +
+      'move or rename it, then approve the check with scripts/verify-consent.js in a terminal.';
+  }
+  const backslash = POSIX ? paths.filter(([, , p]) => QUOTED_BACKSLASH.test(p)) : [];
+  if (backslash.length > 0) {
+    return `${text}The path of ${naming(backslash)} contains a backslash, which shells quote differently, so no ` +
+      'approve command is offered; move or rename it, then approve the check with scripts/verify-consent.js in a terminal.';
+  }
+  const assign = store.name === 'CLAUDE_PLUGIN_DATA'
+    ? `CLAUDE_PLUGIN_DATA=${shellQuote(store.value)} `
+    : `CLAUDE_PLUGIN_DATA= CLAUDE_CONFIG_DIR=${shellQuote(store.value)} `;
+  const shell = POSIX ? ', in a POSIX shell such as bash or zsh' : '';
+  return `${text}To approve it, run this yourself${shell} in a terminal (it must be run in a terminal): ` +
     `${assign}node ${shellQuote(CONSENT_SCRIPT)} approve ${shellQuote(dir)}`;
 }
 
@@ -461,7 +481,8 @@ async function onStop(input, session) {
     return 0;
   }
 
-  // A check runs only after this exact command was approved for this repository. Otherwise the stop
+  // A check runs only after this exact command was approved for this repository and the directory that
+  // holds it (relative to the checkout's top level). Otherwise the stop
   // passes and the session stays dirty; the first such stop per session and project asks for approval.
   const consent = require(CONSENT_SCRIPT);
   if (!consent.isApproved(check.dir, check.command)) {

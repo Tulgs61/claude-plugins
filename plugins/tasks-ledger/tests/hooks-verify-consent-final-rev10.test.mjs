@@ -202,7 +202,7 @@ test('amendment 25 / 30: the consent script never runs a git from the repository
   const a = await approveInChild(hostile, sub, 'yes', sub);
   assert.equal(a.code, 0, a.stderr);
   assert.deepEqual(ranPrograms(markers), []);
-  assert.deepEqual(storeEntries(env), [{ repo: repoIdentity(sub), sha256: commandHash('exit 0\n') }]);
+  assert.deepEqual(storeEntries(env), [{ repo: repoIdentity(sub), sha256: commandHash('exit 0\n'), dir: 'pkg' }]);
   assert.equal(repoIdentity(sub), join(repo, '.git'));
 
   const r = await detached([CONSENT, 'revoke', sub], { env: hostile, cwd: sub });
@@ -312,7 +312,7 @@ test('amendment 27 / 30: with CLAUDE_CONFIG_DIR, the pasted command records into
   assert.match(stop(gateEnv, session, repo).stderr, /e27-config-ran/);
 });
 
-test('amendment 27 / 30: for the ~/.claude default, the pasted command empties both store variables', { skip: !POSIX }, async () => {
+test('amendment 27 / 30: for the ~/.claude default, the pasted command empties CLAUDE_PLUGIN_DATA and pins CLAUDE_CONFIG_DIR to <home>/.claude', { skip: !POSIX }, async () => {
   const repo = makeRepo('e27-default', 'echo e27-default-ran >&2; exit 1\n');
   const home = join(root, 'e27-home');
   mkdirSync(home);
@@ -320,12 +320,12 @@ test('amendment 27 / 30: for the ~/.claude default, the pasted command empties b
   const session = 'rev10-e27-default';
   assert.equal(edit(gateEnv, session, repo).status, 0);
   const command = offeredCommand(messageOf(stop(gateEnv, session, repo)));
-  assert.ok(command.startsWith('CLAUDE_PLUGIN_DATA= CLAUDE_CONFIG_DIR= node \''), command);
+  assert.ok(command.startsWith(`CLAUDE_PLUGIN_DATA= CLAUDE_CONFIG_DIR='${join(home, '.claude').replace(/'/g, "'\\''")}' node '`), command);
 
   const terminalEnv = { ...gateEnv, CLAUDE_PLUGIN_DATA: join(root, 'e27-d-other-data'), CLAUDE_CONFIG_DIR: join(root, 'e27-d-other-config') };
   const rec = paste(command, terminalEnv);
   assert.equal(rec.pluginData, '=');
-  assert.equal(rec.configDir, '=');
+  assert.equal(rec.configDir, `=${join(home, '.claude')}`);
   const a = await approveInChild({ ...terminalEnv, ...recordedEnv(rec) }, rec.args[2], 'yes');
   assert.equal(a.code, 0, a.stderr);
   assert.ok(existsSync(join(home, '.claude', 'tasks-ledger', STORE_NAME)));

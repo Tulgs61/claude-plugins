@@ -239,7 +239,7 @@ test('amendment 21: the printed command\'s environment prefix and arguments sele
 });
 
 // Amendment 27 replaces "nothing for the ~/.claude default": every higher-priority store variable is set empty.
-test('amendment 21 / 27: CLAUDE_CONFIG_DIR is named when it chose the store, and both are emptied for the ~/.claude default', {
+test('amendment 21 / 27: CLAUDE_CONFIG_DIR is named when it chose the store, and for the ~/.claude default CLAUDE_PLUGIN_DATA is emptied and CLAUDE_CONFIG_DIR pinned to <home>/.claude', {
   skip: !POSIX,
 }, () => {
   const repo = makeRepo('d21-config', 'echo d21-config-ran >&2; exit 1\n');
@@ -258,7 +258,7 @@ test('amendment 21 / 27: CLAUDE_CONFIG_DIR is named when it chose the store, and
   const homeEnv = { ...baseEnv, HOME: join(root, 'd21-home') };
   assert.equal(edit(homeEnv, 'rev10-d21-home', repo).status, 0);
   const plain = offeredCommand(messageOf(stop(homeEnv, 'rev10-d21-home', repo)));
-  assert.ok(plain.startsWith(`CLAUDE_PLUGIN_DATA= CLAUDE_CONFIG_DIR= node '${CONSENT}' approve '`), plain);
+  assert.ok(plain.startsWith(`CLAUDE_PLUGIN_DATA= CLAUDE_CONFIG_DIR='${join(root, 'd21-home', '.claude')}' node '${CONSENT}' approve '`), plain);
 });
 
 // --- Amendment 22: foreign owners without root ---
