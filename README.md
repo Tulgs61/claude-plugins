@@ -118,8 +118,9 @@ check; never a suite that reaches real databases or services) and exits 0 when t
   failure, not a guarantee that the turn ends green;
 - the `tasks-engine` workflow requires it to start a run and re-runs it in every task's worktree.
 
-Without the file the gate does nothing. Change `verify.cmd` outside a run: the workflow refuses to verify
-or merge a task whose branch changes it.
+Without the file the gate does nothing. The workflow verifies and merges with the `verify.cmd` committed
+on each task's base, never with a copy a task branch changed. It refuses a task whose branch changes it
+in any letter case, so change `verify.cmd` outside a run.
 
 **Approve it once per repository.** The gate runs a repository's `verify.cmd` only after that exact
 command was approved for that repository. A cloned repository is owned by you, so ownership checks

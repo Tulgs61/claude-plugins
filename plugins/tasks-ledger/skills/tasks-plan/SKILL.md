@@ -1,6 +1,6 @@
 ---
 name: tasks-plan
-description: Plan a list of tasks into a tasks-ledger JSON file under .claude/runs/ without running anything. Splits the work by file ownership, links overlapping work with dependsOn, and gives every task an acceptance, a proof and a budget. Use when the user only wants a plan or estimate for several changes, or when the tasks skill needs a ledger written or refreshed.
+description: Plan a list of tasks into a tasks-ledger JSON file under .claude/runs/ without running anything. Splits the work by file ownership, links overlapping work with `dependsOn`, and gives every task an acceptance, a proof and a budget. Use when the user only wants a plan or estimate for several changes, or when the tasks skill needs a ledger written or refreshed.
 argument-hint: "[goal, task list or spec path] [open PRs]"
 context: fork
 ---
@@ -29,6 +29,10 @@ the repository except the ledger file.
 
 - **New ledger**: name it `.claude/runs/YYYY-MM-DD-<topic>.json`, with today's date and a short
   kebab-case slug that matches `^[a-z0-9][a-z0-9-]*$`. Set `runStatus` to `planned`.
+- **No `dispatch` topics**: the slug is never `dispatch` and never starts with `dispatch-`, because
+  `dispatch/<slug>` branches and `<root>/.claude/worktrees/dispatch-<slug>` worktrees belong to the
+  dispatch skill. When the natural slug would be one of those, pick another one and say so in your
+  reply. An existing ledger whose file name has such a slug is not written: stop and report it.
 - **`topic`, always**: every ledger you write, new or refreshed, has a top-level `topic` equal to the
   slug in its file name (the name without the `YYYY-MM-DD-` date and the `.json`). The helper names
   every branch and worktree after it and refuses a ledger without a valid one. If the file name has
@@ -56,6 +60,16 @@ the repository except the ledger file.
   and rework tasks whose `status` is `todo` or `blocked`. Every other task (`in_progress`, `done`,
   `verified`, `merged`) stays exactly as it is, including its branch, worktree, evidence and PR.
   New ids continue after the highest existing one.
+- **Tasks that need acceptance** (a refresh only): a task with `needsAcceptance` true came in as a
+  title-only inbox line. When your refresh gives it a non-empty `acceptance`, remove its
+  `needsAcceptance` key in the same write, and give it a `proof` and a `budget` as well when it has
+  none. A task that still has no acceptance keeps `needsAcceptance`, is reported as needing one, and
+  is not counted as ready: it appears in no round.
+- **Top-level keys on a refresh**: you own only `goal`, `baseBranch`, `prs`, `setup`, `suite`,
+  `checkTimeoutMin`, `tasks` (within the rules above) and `topic` (only as the `topic` rule allows).
+  Every other top-level key, among them `agents`, `runStatus`, `stopReason`, `integrationBranch`
+  and any key the schema does not list, is kept exactly as it was: never dropped, renamed or given
+  another value.
 
 ## 3. Shape the tasks
 
@@ -89,7 +103,8 @@ Partitioning rules:
      whenever a prefix is empty (a pattern starting with a glob segment overlaps everything).
 
   So `src/api/**` and `src/API/user.ts` overlap, `src/api/**` and `src/web/**` do not, and
-  `src/*.ts` overlaps both.
+  `src/*.ts` overlaps both. By rule 2, `a/../b`, `a/..` and `x..y` each overlap every other
+  pattern, however unrelated it looks.
 - Apart from overlaps, add a `dependsOn` edge only for a real dependency: one task needs code,
   an interface or data that another task produces. Independent work stays unlinked so it can run
   in parallel.
@@ -115,12 +130,16 @@ present, ids and `dependsOn` entries match `^T[0-9]+$`, statuses and `runStatus`
 enums, and tasks carry no keys beyond the ones the schema lists. Check as well that `topic` is
 present, matches `^[a-z0-9][a-z0-9-]*$`, and equals the slug in the ledger's file name. Fix anything
 that does not pass, except a `topic` mismatch that step 2 does not let you correct: that one you
-report, as step 2 says, and leave unchanged.
+report, as step 2 says, and leave unchanged. Check that the `topic` you write is not `dispatch` and
+does not start with `dispatch-`, that on a refresh every top-level key you do not own is
+unchanged, and that no task with a non-empty `acceptance` still has `needsAcceptance`.
 
 Then reply briefly:
 
 - the ledger path;
 - the tasks as rounds: tasks with no open prerequisites first, then those that wait for them, and
-  so on;
+  so on; a task without an acceptance is in no round;
+- every task that still needs an acceptance (no non-empty `acceptance`), named as needing one and
+  not ready, with the hint `/tasks retry <Tn>` once the user has one;
 - a warning, if `.claude/verify.cmd` is not committed, that a run cannot start until it is;
 - any assumption you made about base branch, proofs or file ownership.

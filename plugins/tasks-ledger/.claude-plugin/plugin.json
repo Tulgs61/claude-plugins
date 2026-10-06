@@ -1,7 +1,7 @@
 {
   "name": "tasks-ledger",
   "displayName": "Tasks Ledger",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Run a list of tasks as a delegated, reviewed workflow: a JSON task ledger with dependencies and file ownership, one task-implementer per task in its own git worktree, an independent reviewer per task, dependency-ordered local merges, and optional draft PRs. Includes dispatch-contract and verify-gate hooks.",
   "author": {
     "name": "Tulgs61"

@@ -218,17 +218,19 @@ base
 baseBranch
 blocked
 branch
-BUDGET
 budget
+BUDGET
 checkTimeoutMin
 claude --bg
 .claude/verify.cmd
+${CLAUDE_PLUGIN_ROOT}
 constraints
 constraints_ok
 context
 dependsOn
 description
 dispatch
+dispatch/<slug>
 done
 evidence
 files
@@ -249,6 +251,7 @@ message
 model
 name
 needs_input
+needsAcceptance
 opus
 planned
 pr
@@ -269,6 +272,7 @@ stopped
 stopReason
 suite
 ^T[0-9]+$
+takeover <heldRunId>
 task-implementer
 tasks
 tasks-ledger:reviewer
@@ -281,7 +285,6 @@ topic
 verdict
 verified
 worktree
-${CLAUDE_PLUGIN_ROOT}
 ```
 
 ## Amendments (rev 4)
@@ -336,3 +339,73 @@ These amendments take precedence over the sections above where they differ.
    against `^[a-z0-9][a-z0-9-]*$`. A missing or non-matching stored topic is never put into a command;
    the "no `task/<stored topic>/` branch exists" condition then counts as met, because the helper
    never creates branches for such a ledger.
+
+## Amendments (rev 10)
+
+These amendments take precedence over every earlier section and amendment where they differ. They go
+with tasks-git rev 10 and tasks-engine rev 10. The schema keys `needsAcceptance` and `agents`
+mentioned below are added to `schemas/tasks.schema.json` by the tasks-git change, not by this one.
+
+1. **Dispatch namespace.** The dispatch skill puts its commits on a branch named `dispatch/<slug>` in
+   the worktree `<root>/.claude/worktrees/dispatch-<slug>`, never on a `task/…` branch, because the
+   tasks helper owns the `task/<topic>/…` namespace. The kept test lines in `prose-rev4.test.mjs` that
+   pin the old `task/<slug>` worktree command (rev4-6, including its deliverable check) may be changed
+   to the new names, and only in that respect. The deliverable still names no permanent branch and
+   not the main checkout.
+2. **Dispatch next to a live run.** When the task to dispatch comes from a ledger, dispatch first reads
+   that ledger's `.lock`. While the lock is fresh (younger than six hours), dispatch does not offer a
+   worktree under `<root>/.claude/worktrees/<topic>-…`, and tells the user that the run is live. For a
+   free-text task there is no ledger and no lock to check, and the dispatch worktree of amendment 1
+   never collides with a run's worktrees.
+3. **Cleanup next to a live run.** The tasks skill's cleanup first reads the ledger's `.lock`. While
+   the lock is fresh, it removes nothing, names the run id and age, and stops. The kept cleanup
+   assertions in `prose-rev4.test.mjs` (rev4-7) stay valid and must not be changed.
+4. **Named takeover.** Wherever the tasks skill continues with `takeover` after the user confirmed
+   that the locked run is dead, it passes the run id it showed the user: the engine's `takeover`
+   argument becomes that run id. The helper call then reads `prepare <runId> takeover <heldRunId>`,
+   so a lock that changed in the meantime is not replaced.
+5. **Agent types in the ledger.** When the user asks for non-default agent types, the tasks skill
+   records them in the ledger's top-level `agents` object (`implementer`, `reviewer`) before the run
+   starts, never while a run is live. A resume no longer needs to pass them again, because the engine
+   reads them from the ledger. Passing them as engine arguments still overrides the ledger.
+6. **Tasks that need acceptance.** `add <task>` always writes a non-empty `acceptance`. When a ledger
+   task has `needsAcceptance: true` (a title-only line someone else appended), `status` and the end
+   report list it as needing acceptance, and `retry` refuses it until the user supplies an acceptance.
+   The skill writes it only while no run is live, and clears `needsAcceptance` when it does.
+7. **Prose tests pin key terms.** New prose tests assert the presence of key terms and commands
+   (`dispatch/<slug>`, `.lock`, `takeover <heldRunId>`, `agents`, `needsAcceptance`), not whole
+   sentences. The kept test that checks the `..` overlap wording with only `../x` is complemented by
+   a new test covering `a/../b`, `a/..` and `x..y`.
+8. **Verify consent in the docs.** `rules/conventions.md` states that verify-gate runs a repository's
+   `verify.cmd` only after the user approved it in a terminal (tasks-hooks rev 10), and that a group-
+   or world-writable `verify.cmd` is skipped with a one-time warning, next to the umask advice.
+9. **No `dispatch` topics.** tasks-plan never writes a `topic` equal to `dispatch` or starting with
+   `dispatch-`; it picks another slug and says so. The tasks skill's cleanup only collects worktrees
+   whose checked-out branch is `task/<topic>/…`, never by directory name alone, so dispatch worktrees
+   are never cleanup items.
+10. **Refresh keeps top-level keys.** When tasks-plan refreshes an existing ledger, every top-level key
+    it does not own (among them `agents`) is kept exactly as it was.
+11. **Retry admission.** Retry accepts a `blocked` task, and a `todo` task with `needsAcceptance`.
+    Only for a `blocked` task does it call the helper's `status … todo`. New tests assert both
+    admission cases and that the `status` call depends on the task being `blocked`.
+12. **Key spelling.** Every ledger key the skills name, `needsAcceptance` included, is written as a code
+    span, so the vocabulary test checks it against the schema.
+13. **Re-check the lock before every ledger edit.** Right before the tasks skill edits the ledger itself
+    (recording `agents`, writing an acceptance), it reads the `.lock` again. It edits only when the lock is
+    missing, stale (older than six hours), or still exactly the run id and time it showed the user.
+    Otherwise it stops and asks again.
+14. **Refresh clears `needsAcceptance`.** When tasks-plan's refresh gives a task a non-empty `acceptance`, it
+    clears `needsAcceptance` in the same write. A task that still has no acceptance is reported as needing
+    one and is not counted as ready.
+15. **Retry completes a title-only task.** Retrying a `needsAcceptance` task asks for, or works out with the
+    user, the missing `proof` and `budget` as well as the acceptance, because without them the task is
+    blocked again.
+16. **Old `dispatch` topics.** The tasks skill refuses to start, resume or retry a run on a ledger whose
+    `topic` is `dispatch` or starts with `dispatch-`, and says why and how to rename it.
+17. **Engine start uses the named takeover.** Every place the tasks skill starts the engine with a takeover
+    passes the confirmed run id as the `takeover` value (amendment 4); it never passes `true`. The kept test
+    `prose-rev4.test.mjs` assertion that expects `"takeover": true` after "Only on a clear yes" may be
+    changed to expect the run-id form, and only in that respect.
+18. **Tests.** The rev4-6 test title names the dispatch branch and worktree. The cleanup sandbox test adds a
+    detached worktree whose directory is `<topic>-T<n>`, which must not be collected. Plus a key-term test
+    per amendment 13-17.

@@ -6,6 +6,15 @@
   "required": ["tasks"],
   "additionalProperties": true,
   "properties": {
+    "agents": {
+      "type": "object",
+      "description": "Run-level agent overrides; written by the tasks skill, read by the engine, kept unchanged by the helper.",
+      "additionalProperties": false,
+      "properties": {
+        "implementer": { "type": "string", "pattern": "^[A-Za-z0-9:_-]{1,64}$" },
+        "reviewer": { "type": "string", "pattern": "^[A-Za-z0-9:_-]{1,64}$" }
+      }
+    },
     "baseBranch": { "type": "string", "description": "Branch that tasks without prerequisites start from." },
     "checkTimeoutMin": {
       "type": "number",
@@ -53,6 +62,10 @@
             "description": "Globs of the files this task owns."
           },
           "id": { "type": "string", "pattern": "^T[0-9]+$" },
+          "needsAcceptance": {
+            "type": "boolean",
+            "description": "Set on an inbox task that came without an acceptance; the engine does not start it."
+          },
           "pr": { "type": ["string", "null"] },
           "proof": { "type": "string", "description": "Command whose output shows the acceptance is met." },
           "status": {

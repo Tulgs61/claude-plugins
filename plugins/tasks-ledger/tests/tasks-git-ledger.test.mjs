@@ -77,7 +77,7 @@ test('sync never gives a renumbered task an id that is already taken', t => {
   assert.deepEqual(r.added, ['T4', 'T3', 'T5', 'T6']);
 });
 
-test('sync without an inbox changes nothing and refreshes the lock heartbeat', t => {
+test('sync without an inbox changes nothing and leaves the lock time unchanged', t => {
   const sb = sandbox(t, { tasks: [task('T1')] });
   sb.ok('prepare', 'run-one');
   writeFileSync(sb.lockFile, JSON.stringify({ runId: 'run-one', at: 1000 }));
@@ -87,7 +87,7 @@ test('sync without an inbox changes nothing and refreshes the lock heartbeat', t
   assert.equal(readFileSync(sb.ledgerFile, 'utf8'), before);
   const lock = JSON.parse(readFileSync(sb.lockFile, 'utf8'));
   assert.equal(lock.runId, 'run-one');
-  assert.ok(lock.at > 1000);
+  assert.equal(lock.at, 1000);
 });
 
 test('finish writes runStatus and stopReason and releases the lock', t => {

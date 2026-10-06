@@ -35,7 +35,7 @@ test('rev4-1: a fresh lock is shown with run id and age, takeover only after con
   assert.match(lock, /\bage\b/);
   assert.match(lock, /six hours/);
   assert.match(lock, /dead/);
-  assert.match(lock, /Only on a clear yes[^.]*`"takeover": true`/);
+  assert.match(lock, /Only on a clear yes[^.]*`"takeover": "<lock runId>"`/);
   for (const mode of ['Resume', 'Retry']) {
     const body = section(TASKS, mode);
     assert.match(body, /"Live lock"/, `${mode} goes through the live-lock step`);
@@ -144,17 +144,17 @@ test('rev4-5: the reviewer runs nothing that can write, tests included', () => {
 });
 
 // 6. Dispatch never commits to a permanent branch or the main checkout.
-test('rev4-6: the dispatch deliverable names a task branch in a task worktree', () => {
+test('rev4-6: the dispatch deliverable names the dispatch/<slug> branch in the dispatch-<slug> worktree', () => {
   const block = DISPATCH.match(/```text\n([\s\S]*?)```/)[1];
   const deliverable = block.split('\n').find(l => l.startsWith('DELIVERABLE:'));
   assert.ok(deliverable);
   const target = deliverable.split(';')[0];
-  assert.match(target, /<task branch> in <task worktree>/);
+  assert.match(target, /<dispatch branch> in <dispatch worktree>/);
   assert.doesNotMatch(target, /current worktree|main checkout|\b(main|master|develop|trunk)\b/);
   const where = section(DISPATCH, '3. Settle where the commits go');
   assert.match(where, /never on a permanent branch/);
   assert.match(where, /never in the main checkout/);
-  assert.match(where, /`git -C <root> worktree add -b task\/<slug> <root>\/\.claude\/worktrees\/<slug> <base>`/);
+  assert.match(where, /`git -C <root> worktree add -b dispatch\/<slug> <root>\/\.claude\/worktrees\/dispatch-<slug> <base>`/);
   assert.doesNotMatch(DISPATCH, /current worktree/);
 });
 

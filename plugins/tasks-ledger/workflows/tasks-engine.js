@@ -16,8 +16,14 @@ const TASK_ID = /^T[0-9]+$/;
 const OPS_ATTEMPTS = 3;
 // Values the helper hands back before they go into prompts and command lines.
 const GIT_REF = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/;
-const UNSAFE_PATH = /["$`\\!]|[\u0000-\u001f\u007f]/;
+// Everything bash still expands inside double quotes, plus control characters (C0, DEL, C1) and the
+// Unicode line and paragraph separators.
+const UNSAFE_PATH = /["$`\\!]|[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+// Whitespace other than a plain space; `args` paths refuse the space as well.
+const OTHER_SPACE = /(?! )\s/;
 const STOPPED_MAX = 300;
+// A lock refresh at an agent boundary is skipped while the last successful `sync` is younger.
+const REFRESH_MS = 10 * 60 * 1000;
 
 // ---- arguments (all checks happen before the first agent call) ---------------------------------
 
@@ -25,21 +31,17 @@ if (args == null || typeof args !== 'object') throw new Error('args must be an o
 
 function requirePath(key) {
   const value = args[key];
-  if (typeof value !== 'string' || !value.startsWith('/')) {
-    throw new Error(`args.${key} is required and must be an absolute path`);
-  }
   // The path is double-quoted on the command line; refuse everything bash still expands there.
-  if (UNSAFE_PATH.test(value)) {
-    throw new Error(`args.${key} contains characters that are not safe on a command line`);
+  if (typeof value !== 'string' || !value.startsWith('/') || UNSAFE_PATH.test(value) || /\s/.test(value)) {
+    throw new Error(`args.${key} must match an absolute path without whitespace or control characters`);
   }
   return value;
 }
 
-function agentName(key, fallback) {
-  const value = args[key];
+function checkAgentName(source, key, value, fallback) {
   if (value === undefined || value === null) return fallback;
   if (typeof value !== 'string' || !AGENT_NAME.test(value)) {
-    throw new Error(`args.${key} must match ${AGENT_NAME.source}`);
+    throw new Error(`${source}.${key} must match ${AGENT_NAME.source}`);
   }
   return value;
 }
@@ -50,9 +52,14 @@ if (typeof args.runId !== 'string' || !RUN_ID.test(args.runId)) {
   throw new Error(`args.runId is required and must match ${RUN_ID.source}`);
 }
 const runId = args.runId;
-const implementerType = agentName('implementerAgent', 'tasks-ledger:task-implementer');
-const reviewerType = agentName('reviewerAgent', 'tasks-ledger:reviewer');
-const takeover = Boolean(args.takeover);
+// `undefined` when not given; the ledger's `agents` object then decides (after prepare).
+const implementerArg = checkAgentName('args', 'implementerAgent', args.implementerAgent, undefined);
+const reviewerArg = checkAgentName('args', 'reviewerAgent', args.reviewerAgent, undefined);
+// A string names the run whose lock may be taken over; any other truthy value takes over any lock.
+if (typeof args.takeover === 'string' && !RUN_ID.test(args.takeover)) {
+  throw new Error(`args.takeover must match ${RUN_ID.source}`);
+}
+const takeoverArgs = typeof args.takeover === 'string' ? ['takeover', args.takeover] : args.takeover ? ['takeover'] : [];
 
 // ---- helper calls ------------------------------------------------------------------------------
 
@@ -69,11 +76,19 @@ function quoteText(text, max = 600) {
 }
 
 const isGitRef = value => typeof value === 'string' && GIT_REF.test(value);
-const isSafePath = value => typeof value === 'string' && value.startsWith('/') && !UNSAFE_PATH.test(value);
+const isSafePath = value =>
+  typeof value === 'string' && value.startsWith('/') && !UNSAFE_PATH.test(value) && !OTHER_SPACE.test(value);
+
+// The first `max` UTF-16 units of `value`, moved back before a surrogate pair the cut would split.
+function cut(value, max) {
+  let end = Math.min(max, value.length);
+  if (end > 0 && end < value.length && /[\ud800-\udbff]/.test(value[end - 1]) && /[\udc00-\udfff]/.test(value[end])) end--;
+  return value.slice(0, end);
+}
 
 // `result.stopped` is always one line of at most STOPPED_MAX characters.
 function oneLine(reason) {
-  return String(reason).replace(/\s+/g, ' ').trim().slice(0, STOPPED_MAX).trim();
+  return cut(String(reason).replace(/\s+/g, ' ').trim(), STOPPED_MAX).trim();
 }
 
 const OPS_SCHEMA = {
@@ -297,7 +312,7 @@ function reviewerPrompt(t, place, diffBase, verifyTail) {
 // ---- run ---------------------------------------------------------------------------------------
 
 phase('prepare');
-const prepared = await ops('prepare', runId, ...(takeover ? ['takeover'] : []));
+const prepared = await ops('prepare', runId, ...takeoverArgs);
 if (!prepared.ok) {
   return {
     locked: Boolean(prepared.locked),
@@ -310,28 +325,83 @@ const tasks = new Map(); // id -> ledger task, in ledger order
 const results = [];
 let stopped = null;
 let prsResult = null;
+// Tasks that can never start, in the order they were learned. They are blocked once, when learned,
+// and named at the end, but they are no failure of the run: the other tasks keep running.
+const badIds = []; // task ids not of the form T<n>
+const needAcceptance = []; // ids of tasks with `needsAcceptance: true`
+// id -> note of every task set aside. Filled synchronously when an answer reports the task, before
+// any further `await`, so `ready` never lets a scheduling step start one.
+const aside = new Map();
 
-function learn(listed) {
-  for (const t of list(listed)) {
-    if (!t || typeof t !== 'object' || typeof t.id !== 'string' || tasks.has(t.id)) continue;
-    tasks.set(t.id, { ...t });
-  }
+// Why a task can never start, or null. The helper refuses ledgers with invalid ids; this is the
+// second line of defence. A title-only task without proof or budget needs acceptance as well.
+function asideNote(t) {
+  if (!TASK_ID.test(t.id)) return 'invalid task id: not of the form T<n>';
+  if (t.status !== 'todo' && t.status !== 'verified') return null;
+  if (t.needsAcceptance === true) return 'needs acceptance';
+  if (!text(t.acceptance) && (!text(t.proof) || !text(t.budget))) return 'needs acceptance';
+  return null;
 }
-learn(prepared.tasks);
 
-function finishTask(t, status, note) {
+// Adds the tasks not known yet and returns them; a known task is never removed or overwritten.
+function learn(listed) {
+  const added = [];
+  for (const t of list(listed)) {
+    if (!t || typeof t !== 'object') continue;
+    const id = typeof t.id === 'string' ? t.id : String(t.id);
+    if (tasks.has(id)) continue;
+    const known = { ...t, id };
+    tasks.set(id, known);
+    const note = asideNote(known);
+    if (note !== null) {
+      aside.set(id, note);
+      (TASK_ID.test(id) ? needAcceptance : badIds).push(id);
+    }
+    added.push(known);
+  }
+  return added;
+}
+const initialTasks = learn(prepared.tasks);
+
+// Blocks a task set aside when it was learned, ready or not, and returns whether it did. `block`
+// makes no `status` call for an id that may not reach a command line.
+async function setAside(t) {
+  if (!aside.has(t.id)) return false;
+  await block(t, aside.get(t.id), false);
+  return true;
+}
+
+// Agent types: `args` first, then the ledger's `agents` object, then the defaults. A ledger value
+// passes the same rule as an argument; an invalid one starts no agent and stops the run.
+const ledgerAgents = prepared.agents && typeof prepared.agents === 'object' ? prepared.agents : {};
+let implementerType = 'tasks-ledger:task-implementer';
+let reviewerType = 'tasks-ledger:reviewer';
+let agentsError = null;
+try {
+  implementerType = implementerArg !== undefined
+    ? implementerArg
+    : checkAgentName('agents', 'implementer', ledgerAgents.implementer, implementerType);
+  reviewerType = reviewerArg !== undefined
+    ? reviewerArg
+    : checkAgentName('agents', 'reviewer', ledgerAgents.reviewer, reviewerType);
+} catch (error) {
+  agentsError = error.message;
+}
+
+// `failure` false: the task is set aside and does not count as the run's first failure.
+function finishTask(t, status, note, failure = true) {
   t.status = status;
   results.push({ id: t.id, status, note });
   log(`${t.id} ${status}: ${note}`);
-  if (status !== 'merged' && stopped === null) stopped = `${t.id} ${status}: ${note}`;
+  if (failure && status !== 'merged' && stopped === null) stopped = `${t.id} ${status}: ${note}`;
 }
 
-async function block(t, note) {
+async function block(t, note, failure = true) {
   if (TASK_ID.test(t.id)) {
     const answer = await ops('status', t.id, 'blocked', quoteText(note));
     if (!answer.ok) note = `${note} (ledger not updated: ${answer.error || 'no answer'})`;
   }
-  finishTask(t, 'blocked', note);
+  finishTask(t, 'blocked', note, failure);
 }
 
 async function merge(t) {
@@ -348,7 +418,6 @@ async function verify(t) {
 }
 
 async function driveTask(t) {
-  if (!TASK_ID.test(t.id)) return finishTask(t, 'blocked', 'task id is not of the form T<n>');
   if (t.status === 'verified') return merge(t); // resumed: reviewed in an earlier run
   if (!text(t.proof) || !text(t.budget)) return block(t, 'not dispatchable: the task has no proof or no budget');
 
@@ -359,20 +428,20 @@ async function driveTask(t) {
   if (!isGitRef(place.base)) return block(t, 'worktree failed: the helper returned an invalid base ref');
   const diffBase = place.base.startsWith('task/') ? place.base : prepared.start || place.base;
 
-  if ((await agent(implementerPrompt(t, place), { agentType: implementerType })) == null) {
+  if ((await runAgent(implementerPrompt(t, place), { agentType: implementerType })) == null) {
     return block(t, 'the implementer did not finish');
   }
   let checked = await verify(t);
   if (!checked.ok) {
     log(`${t.id}: verification failed (${checked.error}); one more implementer attempt`);
-    if ((await agent(implementerPrompt(t, place, checked.output), { agentType: implementerType })) == null) {
+    if ((await runAgent(implementerPrompt(t, place, checked.output), { agentType: implementerType })) == null) {
       return block(t, `the implementer did not finish its retry after: ${checked.error}`);
     }
     checked = await verify(t);
     if (!checked.ok) return block(t, `verification failed twice: ${checked.error}`);
   }
 
-  const review = await agent(reviewerPrompt(t, place, diffBase, checked.tail), {
+  const review = await runAgent(reviewerPrompt(t, place, diffBase, checked.tail), {
     agentType: reviewerType,
     schema: REVIEW_SCHEMA,
   });
@@ -400,6 +469,7 @@ async function driveTask(t) {
 const running = new Map(); // id -> promise
 
 function ready(t) {
+  if (aside.has(t.id)) return false; // set aside: never ready, also while its `status` call runs
   if (t.status !== 'todo' && t.status !== 'verified') return false;
   if (!list(t.dependsOn).every(d => tasks.has(d) && tasks.get(d).status === 'merged')) return false;
   for (const id of running.keys()) if (globListsOverlap(tasks.get(id).files, t.files)) return false;
@@ -415,27 +485,56 @@ function start(t) {
   running.set(t.id, promise);
 }
 
+let lastSync = null; // clock time of this run's last successful `sync`
+
 async function syncTasks() {
   // The run id lets the helper refresh the lock only while it still names this run.
   const answer = await ops('sync', runId);
-  if (answer.ok) learn(answer.tasks);
-  else log(`sync failed: ${answer.error || 'unknown error'}`);
-}
-
-// A `start` from prepare is checked once, before any task agent runs. An invalid one stops the run
-// and blocks every task it would otherwise drive.
-const badStart = prepared.start != null && !isGitRef(prepared.start);
-if (badStart) {
-  const shown = JSON.stringify(String(prepared.start)).slice(0, 80);
-  stopped = `prepare returned an invalid start ref ${shown}`;
-  for (const t of tasks.values()) {
-    if (t.status === 'todo' || t.status === 'verified') await block(t, `prepare returned an invalid start ref ${shown}`);
+  if (answer.ok) {
+    lastSync = Date.now();
+    for (const t of learn(answer.tasks)) await setAside(t);
+  } else {
+    log(`sync failed: ${answer.error || 'unknown error'}`);
   }
 }
 
+// Keeps the run lock fresh during long agent calls. A failed refresh is only logged.
+async function refreshLock() {
+  if (lastSync !== null && Date.now() - lastSync < REFRESH_MS) return;
+  try {
+    await syncTasks();
+  } catch (error) {
+    log(`lock refresh failed: ${(error && error.message) || error}`);
+  }
+}
+
+// An implementer or reviewer agent, with a lock refresh right before it starts and right after it
+// returns (also when it throws).
+async function runAgent(prompt, options) {
+  await refreshLock();
+  try {
+    return await agent(prompt, options);
+  } finally {
+    await refreshLock();
+  }
+}
+
+// A `start` from prepare is checked once, before any task agent runs. An invalid one stops the run
+// and blocks every task it would otherwise drive. Tasks that can never start are set aside first,
+// in the same pass in ledger order.
+const badStart = prepared.start != null && !isGitRef(prepared.start);
+const startReason = badStart ? `prepare returned an invalid start ref ${cut(JSON.stringify(String(prepared.start)), 80)}` : null;
+if (badStart) stopped = startReason;
+for (const t of initialTasks) {
+  if (await setAside(t)) continue;
+  if (badStart && (t.status === 'todo' || t.status === 'verified')) await block(t, startReason);
+}
+
+if (agentsError !== null) stopped = stopped === null ? agentsError : `${agentsError}; ${stopped}`;
+
 phase('run tasks');
 try {
-  while (!badStart) {
+  while (!badStart && agentsError === null) {
     if (stopped === null) {
       // `running` grows inside this loop, so two tasks that become ready together never overlap.
       for (const t of tasks.values()) if (!running.has(t.id) && ready(t)) start(t);
@@ -457,10 +556,18 @@ try {
 const idsWith = status => [...tasks.values()].filter(t => t.status === status).map(t => t.id);
 const waiting = idsWith('todo');
 const blocked = idsWith('blocked');
+// Tasks set aside are named here, each exactly once and before any other reason; no other reason
+// names them, since they are neither a failure nor unfinished work.
 if (stopped === null) {
-  const unfinished = [...tasks.values()].filter(t => t.status !== 'merged').map(t => `${t.id} ${t.status}`);
+  const unfinished = [...tasks.values()]
+    .filter(t => t.status !== 'merged' && !aside.has(t.id))
+    .map(t => `${t.id} ${t.status}`);
   if (unfinished.length) stopped = `unfinished tasks: ${unfinished.join(', ')}`;
 }
+const shownId = id => (/^[A-Za-z0-9._-]+$/.test(id) ? id : JSON.stringify(id));
+const asideReasons = needAcceptance.map(id => `${id} needs acceptance`);
+if (badIds.length) asideReasons.push(`invalid task ids: ${badIds.map(shownId).join(', ')}`);
+if (asideReasons.length) stopped = [...asideReasons, ...(stopped === null ? [] : [stopped])].join('; ');
 
 phase('finish');
 if (stopped === null && prepared.prs === true) {
@@ -470,17 +577,26 @@ if (stopped === null && prepared.prs === true) {
 }
 if (stopped !== null) stopped = oneLine(stopped);
 
-// The run id comes last, so the helper removes the lock only while it still names this run; a
-// finished run passes an empty reason to keep it in place.
+// The run id comes last, so the helper removes the lock only while it still names this run. A
+// finished run passes an empty reason, which the helper stores as `null` (`stopReason`).
 const finished = stopped === null
   ? await ops('finish', 'finished', '""', runId)
   : await ops('finish', 'stopped', quoteText(stopped), runId);
-if (!finished.ok) log(`finish failed: ${finished.error || 'unknown error'}`);
+// A refused `finish` leaves the ledger's run status as it was, so the run did not complete: the
+// reason says so, after any earlier one, and a lock now held by another run is reported as `locked`.
+let locked = false;
+if (!finished.ok) {
+  locked = finished.locked === true;
+  const why = `finish failed: ${finished.error || 'unknown error'}`;
+  log(why);
+  stopped = oneLine(stopped === null ? why : `${stopped}; ${why}`);
+}
 
 return {
   blocked,
   integration: prepared.integration,
   ledger: ledgerPath,
+  locked,
   prs: prsResult,
   results,
   stopped,

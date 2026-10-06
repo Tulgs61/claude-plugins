@@ -46,6 +46,43 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ## tasks-ledger
 
+### [0.3.0] - 2026-10-06
+
+#### Changed
+
+- `dispatch` commits on `dispatch/<slug>` in `.claude/worktrees/dispatch-<slug>`, never on a `task/…` branch,
+  so it can't collide with a run's branches. It refuses a live run's worktrees, and tasks-plan never
+  picks a `dispatch` topic.
+- Agent-type overrides are recorded in the ledger's `agents` object, so `resume` in a new session uses
+  them again. Workflow args still take precedence.
+- A takeover names the run it replaces (`prepare <runId> takeover <heldRunId>`). The tasks skill passes the
+  run id it showed you, so a lock that changed in the meantime is not replaced.
+- A title-only task added to the inbox is stored with `needsAcceptance: true`. The engine blocks it
+  without stopping other work, and `retry` asks for its acceptance, proof and budget.
+- `verify` and `merge` run the `verify.cmd` committed on the task's base. A branch that changes it in
+  any letter case is refused, and an empty one fails.
+
+#### Fixed
+
+- The run lock and its guard: guards always name their owner and are broken only when the owner is gone
+  or after 10 minutes, a live holder is never broken, and release removes only its own guard. Every
+  ledger write is a read-modify-write under the guard. Overlapping `sync`, `prepare`, `finish`, `status`,
+  `merge` and `worktree` calls can no longer undo each other or lose ingested inbox lines.
+- `sync` without a run id no longer refreshes the lock. The engine refreshes it at agent boundaries, so
+  long batches are not taken over as stale.
+- An unreadable or unparsable lock is treated as held by `prepare` (a bare `takeover` still replaces
+  it), and another user's lock or ledger is refused. The inbox may be written by others, so a foreign
+  inbox is still ingested, but one that cannot be opened is owner-checked. Checked files and the guard are
+  read through a single no-follow, non-blocking open, so a FIFO or symlink can neither redirect nor
+  block the helper.
+- `merge` reports untracked files in the integration worktree as such, not as a conflict, and overlap
+  warnings skip merged tasks.
+- The engine refuses whitespace and control characters in its path arguments, never splits a surrogate
+  pair when shortening text, blocks invalid task ids, and reports a refused `finish` (`locked` in the
+  result).
+- The skills re-read the lock before they edit a ledger, and cleanup refuses while a run is live and
+  collects only worktrees on `task/<topic>/…` branches.
+
 ### [0.2.0] - 2026-10-06
 
 #### Changed

@@ -87,7 +87,7 @@ test('the schema pins the ledger shape from the spec', () => {
   assert.notEqual(SCHEMA.additionalProperties, false, 'extra top-level keys are allowed');
   const top = SCHEMA.properties;
   assert.deepEqual(Object.keys(top).sort(), [
-    'baseBranch', 'checkTimeoutMin', 'goal', 'integrationBranch', 'prs', 'runStatus', 'setup', 'stopReason', 'suite', 'tasks', 'topic',
+    'agents', 'baseBranch', 'checkTimeoutMin', 'goal', 'integrationBranch', 'prs', 'runStatus', 'setup', 'stopReason', 'suite', 'tasks', 'topic',
   ]);
   assert.deepEqual([...top.runStatus.enum].sort(), ['finished', 'planned', 'running', 'stopped']);
   assert.equal(top.topic.pattern, '^[a-z0-9][a-z0-9-]*$');
@@ -96,7 +96,7 @@ test('the schema pins the ledger shape from the spec', () => {
   assert.equal(t.additionalProperties, false);
   assert.deepEqual([...t.required].sort(), ['acceptance', 'dependsOn', 'files', 'id', 'status', 'title']);
   assert.deepEqual(Object.keys(t.properties).sort(), [
-    'acceptance', 'base', 'branch', 'budget', 'constraints', 'dependsOn', 'evidence', 'files', 'id', 'pr', 'proof', 'status', 'title', 'worktree',
+    'acceptance', 'base', 'branch', 'budget', 'constraints', 'dependsOn', 'evidence', 'files', 'id', 'needsAcceptance', 'pr', 'proof', 'status', 'title', 'worktree',
   ]);
   assert.equal(t.properties.id.pattern, '^T[0-9]+$');
   assert.equal(t.properties.dependsOn.items.pattern, '^T[0-9]+$');

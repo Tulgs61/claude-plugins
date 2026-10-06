@@ -316,3 +316,80 @@ These amendments take precedence over the sections above where they differ.
    even when there is no task to drive. This replaces the per-task check of rev 5, amendment 1.
 2. **Run id on `finish`.** The engine passes its run id as the last argument of `finish`, so the
    helper removes only this run's lock (tasks-git rev 7). The ops prompt keeps its pinned form.
+
+## Amendments (rev 10)
+
+These amendments take precedence over every earlier section and amendment where they differ. They
+rely on tasks-git rev 10 (the `agents` key in the `prepare` answer, `needsAcceptance`, and the
+refusal of invalid task ids).
+
+1. **Lock refresh during long batches.** The engine refreshes the run lock not only when a task
+   finishes but at every agent boundary: right before it starts an implementer or reviewer agent,
+   and right after such an agent returns. To refresh, it calls the existing `sync <runId>` (no new
+   helper command).
+   - A refresh is skipped when the previous successful `sync` of this run is less than 10 minutes
+     old, measured with the clock.
+   - Tasks that a refresh's `sync` reports as added join the schedule as usual.
+   - A failed refresh is logged and does not stop the run.
+2. **Agent types from the ledger.** The agent type for implementers is `args.implementerAgent` when
+   given, otherwise `agents.implementer` from the `prepare` answer, otherwise the default. The same
+   order applies to the reviewer with `reviewerAgent` and `agents.reviewer`. A value taken from the
+   ledger must pass the same agent-type rule. If it does not, no agent starts and `stopped` contains
+   `agents.<key> must match`.
+3. **Tasks that need acceptance.** A task with `needsAcceptance: true` is never started. It is
+   blocked, through the helper's `status … blocked`, with the reason `needs acceptance`, and no agent
+   runs for it.
+4. **Task ids.** A task in the `prepare` answer whose id does not match `^T[0-9]+$` is never started
+   and appears in `blocked` and in `stopped`. The helper refuses such ledgers (tasks-git rev 10), so
+   this is a second line of defence. It makes no `status` call for that id.
+5. **Path arguments.** `args.ledger` and `args.script` must be absolute paths with no whitespace, no
+   control characters (C0, DEL and C1) and neither U+2028 nor U+2029. Otherwise the body throws, before
+   any agent runs, with `args.<key> must match`. The same character rule applies to a `worktree`
+   value from the helper (in addition to rev 4, amendment 1), but spaces stay allowed there.
+6. **One-line cut.** Shortening a text to one line never splits a surrogate pair. When the cut would
+   fall between the two halves of a pair, it falls before the pair.
+7. **Comment.** The comment above the `finish` calls says that a finished run passes an empty reason,
+   which the helper stores as `null` (tasks-git rev 8).
+8. **Named takeover.** When `args.takeover` is a string matching the helper's run-id rule, the engine
+   calls `prepare <runId> takeover <args.takeover>`. Any other truthy value calls `prepare <runId>
+   takeover` as before. A string that does not match the run-id rule throws before any agent runs,
+   with `args.takeover must match`. The ops prompt keeps its pinned form, with the extra argument
+   after `takeover`.
+9. **Tests**, in new test files, each able to fail before the change:
+   - failure paths: helper refusal on `worktree`, `verify`, `merge` and `status`, an implementer that
+     never finishes, a thrown exception, each giving a blocked task with a note;
+   - a task that becomes ready later and has an invalid `start` is not started;
+   - the 300-character cut applied to a `stopped` text built from unfinished tasks;
+   - `finish`: the engine's handling of the helper's answer, both `ok: false` and a superseded
+     run, not only where the run id sits in the command;
+   - one test per amendment 1-6 and 8, including a refresh between two long agent calls, ledger `agents`
+     used and overridden by `args`, a `needsAcceptance` task, a whitespace `args.ledger`, a U+2028 in
+     `args.script`, and a cut through an emoji.
+
+### Fixes after review (rev 10, continued)
+
+10. **Unstartable tasks never halt the run.** Tasks with `needsAcceptance: true` and tasks with an invalid
+    id are handled once, right after `prepare` and after every `sync` that reports them, whether or not
+    they are ready. Each is blocked through the helper's `status … blocked` (a `needsAcceptance` task with
+    the reason `needs acceptance`; an invalid id gets no `status` call, as in amendment 4). They do not
+    count as the run's first failure, so the other tasks keep running. At the end `stopped` names each of
+    them exactly once, by exact id (no substring matching), for example `T4 needs acceptance; invalid
+    task ids: 1`. This replaces the "is never started" handling of amendments 3 and 4 where it differs.
+11. **Result keys.** The result also carries `locked`: `true` when `finish` was refused because another
+    run holds the lock, otherwise `false`. A refused `finish` makes `stopped` non-null with the reason
+    `finish failed: <error>`, added after any earlier reason. The Result table includes `locked`.
+12. **Visible test data.** Invisible characters in test sources (no-break space, line and paragraph
+    separators, other format characters) are written as `\u` escapes.
+13. **Tests**, each able to fail before the change: ids `1` and `T1` where `T1` fails, so `stopped` names
+    both; `[T1 needsAcceptance, T2, T3 dependsOn T2]`: T2 and T3 merge and T1 is blocked and named;
+    a `needsAcceptance` task whose prerequisite never merges is still blocked in the ledger; `locked`
+    in the result. The amendment 9 tests that pin behaviour that already existed may pass before the
+    change. They are coverage.
+14. **Unstartable means never ready.** The readiness check itself excludes every task with
+    `needsAcceptance: true` and every task with an invalid id, so no scheduling step can start one, whatever
+    order the helper calls finish in. Such a task is marked as set aside in the engine's own state
+    synchronously, as soon as an answer reports it and before any further `await`. The helper's
+    `status … blocked` call follows. A title-only task that also lacks `proof` or `budget` is set aside the same
+    way (reason `needs acceptance`) and never counts as the run's first failure. Test: a lock-refresh `sync`
+    during two running tasks reports five `needsAcceptance` tasks; none of them gets an implementer,
+    reviewer, `status verified` or `merge`, and all five are named in `stopped`.

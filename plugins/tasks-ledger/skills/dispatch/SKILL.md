@@ -15,10 +15,16 @@ yourself unless the user asks for that afterwards.
 
 - **A ledger id** (`T` followed by digits): look in `.claude/runs/` of the current repository for
   the ledger that holds it. If several ledgers do, use the most recent one and say which. Take
-  `title`, `acceptance`, `proof`, `budget`, `files`, `constraints`, and `branch`/`worktree` when
-  they are set.
+  `title`, `acceptance`, `proof`, `budget`, `files` and `constraints`.
+
+  Then read that ledger's `.lock` (`<ledger without .json>.lock`, a JSON object with `runId` and
+  `at` in epoch milliseconds). While it is fresh (`at` less than six hours ago), the run is live:
+  tell the user so, with the lock's run id and age, and that the run may be working on this very
+  task. Offer no worktree under `<root>/.claude/worktrees/<topic>-…`, and go on only with the
+  dispatch worktree of step 3 once the user wants that. A stale or missing lock needs no remark.
 - **Free text**: read enough of the repository to know which files the change will touch and how
-  the project checks its work (test scripts, `.claude/verify.cmd`, CI config).
+  the project checks its work (test scripts, `.claude/verify.cmd`, CI config). There is no ledger
+  and no lock to check.
 
 If neither works (unknown id, no repository), say so and stop.
 
@@ -33,17 +39,20 @@ Ask as well, rather than inventing, when the outcome or the file scope is unclea
 
 ## 3. Settle where the commits go
 
-The work is committed on a task branch in its own worktree, never on a permanent branch (`main`,
-`master`, `develop`, `trunk`, or the project's base branch) and never in the main checkout.
+The work is committed on a dispatch branch in its own worktree, never on a permanent branch (`main`,
+`master`, `develop`, `trunk`, or the project's base branch) and never in the main checkout. It is
+never on a `task/…` branch either: the tasks helper owns the `task/<topic>/…` namespace and the
+`<root>/.claude/worktrees/<topic>-…` worktrees of its runs.
 
-- If the ledger task has a `branch` and `worktree` that meet this, use them.
-- Otherwise propose a branch `task/<slug>` and a worktree `<root>/.claude/worktrees/<slug>`, where
-  `<root>` is the main checkout's top level and `<slug>` a short kebab-case name, and show the one
-  command that creates both from the base the user works from:
-  `git -C <root> worktree add -b task/<slug> <root>/.claude/worktrees/<slug> <base>`. The implementer
-  does not create branches or worktrees itself, so this runs before the contract is handed over.
-- If the task or the user names a permanent branch or the main checkout as the place to commit,
-  do not use it; say why and propose a task branch as above.
+- Propose a branch `dispatch/<slug>` and a worktree `<root>/.claude/worktrees/dispatch-<slug>`,
+  where `<root>` is the main checkout's top level and `<slug>` a short kebab-case name, and show the
+  one command that creates both from the base the user works from:
+  `git -C <root> worktree add -b dispatch/<slug> <root>/.claude/worktrees/dispatch-<slug> <base>`.
+  If that branch or worktree already exists, pick another slug. The implementer does not create
+  branches or worktrees itself, so this runs before the contract is handed over.
+- A ledger task's own `branch` and `worktree` belong to its run and are never reused.
+- If the task or the user names a permanent branch, the main checkout or a `task/…` branch as the
+  place to commit, do not use it; say why and propose a dispatch branch as above.
 
 ## 4. Write the six parts
 
@@ -54,7 +63,7 @@ dispatch-guard hook recognises the PROOF and BUDGET sections:
 OUTCOME: <observable end state, phrased as what is true afterwards, not as activity>
 PROOF: <the exact command to run; its output must appear in the agent's transcript>
 CONSTRAINTS: <what must stay unchanged; the only paths that may change: <globs>; other limits>
-DELIVERABLE: commits on <task branch> in <task worktree>, both from step 3; no merge, no push to a permanent branch
+DELIVERABLE: commits on <dispatch branch> in <dispatch worktree>, both from step 3; no merge, no push to a permanent branch
 BUDGET: <stop clause, e.g. "stop after 40 turns and report what blocks">
 ESCALATION: <when to stop and ask instead of guessing: schema or migration changes, auth or payment code, an ambiguous spec, any file outside the scope, plus task-specific cases>
 ```
@@ -73,10 +82,10 @@ Show the same contract in these three forms, in this order, each ready to paste:
 
 1. **Agent call**: an Agent tool call with `subagent_type: "tasks-ledger:task-implementer"` (or the
    agent the user named), a short `description`, and the contract as `prompt`.
-2. **`claude --bg` command**: one shell command, run from the task worktree of step 3, that passes
-   the contract as the prompt, quoted so the shell leaves it intact (a single-quoted string or a
-   heredoc).
-3. **`/goal`**: `/goal` followed by the contract, for use inside a session that runs in the task
+2. **`claude --bg` command**: one shell command, run from the dispatch worktree of step 3, that
+   passes the contract as the prompt, quoted so the shell leaves it intact (a single-quoted string or
+   a heredoc).
+3. **`/goal`**: `/goal` followed by the contract, for use inside a session that runs in the dispatch
    worktree of step 3.
 
 End with one line naming any assumption you made while filling the parts.

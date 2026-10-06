@@ -64,9 +64,8 @@ skill passes it in the Workflow args. A name may contain only letters, digits, `
 value stops the workflow before an agent starts. Whatever agent you pick still gets the contract the
 workflow writes (worktree, proof, files scope, budget) and must respect it.
 
-The overrides are not stored in the ledger. When you continue a run with `/tasks-ledger:tasks resume` in a
-new session, repeat them (for example "resume with my own `reviewer` agent"), otherwise the resumed run
-uses the defaults.
+The `tasks` skill records the overrides in the ledger's `agents` object before the run starts, so a
+`/tasks-ledger:tasks resume` in a new session uses them again. Workflow args still take precedence.
 
 ## Hooks
 

@@ -14,7 +14,7 @@ Every delegation of a code change (an Agent call to an implementer, a `claude --
 | **Outcome** | Observable end state, not activity. |
 | **Proof** | Exact command whose output lands in the agent's transcript. |
 | **Constraints** | What must not change, including the `files` scope. |
-| **Deliverable** | A commit on the worktree branch; a draft PR only if the user asked; never merge. |
+| **Deliverable** | A commit on the worktree branch (`dispatch/<slug>` for a `dispatch` contract); a draft PR only if the user asked; never merge. |
 | **Budget** | Stop clause (e.g. "stop after 40 turns and report what blocks"); the agent's `maxTurns` is the hard cap behind it. |
 | **Escalation** | When to stop and ask instead of guessing (schema/migration changes, auth/payments, an ambiguous spec, any file outside the scope). |
 
@@ -71,6 +71,11 @@ The date in a file name is the day the file was written and never changes.
 | Task branch | `task/<topic>/<Tn>` | local; pushed only with `prs: true` |
 | Base of a task with several prerequisites | `task/<topic>/<Tn>-base` | local; pushed only as a PR target with `prs: true` |
 | Integration branch (every verified task merged, full suite run) | `task/<topic>/integration` | local, never pushed |
+| Dispatch branch (one `dispatch` contract, outside any run) | `dispatch/<slug>` | local |
+| Dispatch worktree | `.claude/worktrees/dispatch-<slug>/` | ignored |
+
+The `task/<topic>/…` namespace and the `<topic>-…` worktrees belong to the tasks helper; `dispatch`
+never commits there.
 
 Add these lines to the project's `.gitignore`:
 
@@ -119,6 +124,6 @@ the file (committed, so every worktree has it).
   human. Without the file the hook does nothing.
 - Task-implementers run it before they finish, and the tasks workflow re-runs it in every task
   worktree and on the integration branch (after the ledger's `setup`, followed by its `suite`).
-- Change `verify.cmd` outside a run: `tasks-git` `verify` and `merge` refuse a task whose branch
-  modifies it compared with the task's base.
+- Change `verify.cmd` outside a run: `tasks-git` `verify` and `merge` run the `verify.cmd` committed
+  on the task's base and refuse a task whose branch changes it, in any letter case.
 - The command runs with your user's rights. Read the command `approve` shows before you type `yes`.

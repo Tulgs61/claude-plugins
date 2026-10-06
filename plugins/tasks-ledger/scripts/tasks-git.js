@@ -6,11 +6,12 @@
 
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const TASK_KEYS = [
   'acceptance', 'base', 'branch', 'budget', 'constraints', 'dependsOn', 'evidence',
-  'files', 'id', 'pr', 'proof', 'status', 'title', 'worktree',
+  'files', 'id', 'needsAcceptance', 'pr', 'proof', 'status', 'title', 'worktree',
 ];
 const LISTING_LISTS = ['constraints', 'dependsOn', 'files'];
 const LISTING_SCALARS = ['acceptance', 'base', 'branch', 'budget', 'id', 'pr', 'proof', 'status', 'title', 'worktree'];
@@ -18,14 +19,19 @@ const ID_RE = /^T[0-9]+$/;
 const INBOX_ID_RE = /^T[0-9]{1,9}$/;
 const TOPIC_RE = /^[a-z0-9][a-z0-9-]*$/;
 const RUN_ID_RE = /^[A-Za-z0-9-]{4,64}$/;
+const AGENT_NAME_RE = /^[A-Za-z0-9:_-]{1,64}$/;
+const AGENT_ROLES = ['implementer', 'reviewer'];
 const SETTABLE = ['blocked', 'done', 'in_progress', 'todo', 'verified'];
 const RUN_STATUSES = ['finished', 'running', 'stopped'];
 const LOCK_TTL_MS = 6 * 60 * 60 * 1000;
-const GUARD_STALE_MS = 10 * 1000;
+const GUARD_ABANDON_MS = 10 * 60 * 1000;
 const GUARD_WAIT_MAX_MS = 30 * 1000;
 const TAKEOVER_SETTLE_MS = 1500;
 const DEFAULT_CHECK_TIMEOUT_MIN = 30;
 const EVIDENCE_MAX = 4000;
+const MAX_FILE_BYTES = 32 * 1024 * 1024;
+const OPEN_NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
+const OPEN_NONBLOCK = fs.constants.O_NONBLOCK || 0;
 const TAIL_MAX = 2000;
 const PERMANENT_BRANCHES = ['main', 'master', 'develop', 'trunk'];
 
@@ -128,7 +134,7 @@ function exitCode(r) {
 // Runs a shell check in bash inside `cwd`.
 function shellCheck(L, command, cwd) {
   const minutes = Number(L.checkTimeoutMin) > 0 ? Number(L.checkTimeoutMin) : DEFAULT_CHECK_TIMEOUT_MIN;
-  const r = run('bash', ['-c', command], cwd, { timeout: minutes * 60 * 1000 });
+  const r = run('bash', ['-c', command], cwd, { timeout: Math.max(1, Math.round(minutes * 60 * 1000)) });
   const output = r.stdout + r.stderr + (r.error && r.error.code === 'ETIMEDOUT' ? `\n(timed out after ${minutes} min)` : '');
   return { ok: r.status === 0, code: exitCode(r), tail: tail(output) };
 }
@@ -162,8 +168,93 @@ function writeAtomic(file, text) {
   fs.renameSync(tmp, file);
 }
 
+// Writes ctx.L and returns the text written.
 function persistLedger(ctx) {
-  writeAtomic(ctx.ledgerFile, JSON.stringify(ctx.L, null, 2) + '\n');
+  const text = JSON.stringify(ctx.L, null, 2) + '\n';
+  writeAtomic(ctx.ledgerFile, text);
+  return text;
+}
+
+// Checks what lstat or fstat reports for a ledger, lock or inbox file: a regular file of at most
+// MAX_FILE_BYTES that, with `own`, belongs to this user.
+function checkFileStat(st, file, what, own) {
+  if (st.isSymbolicLink()) fail(`${what} ${file} is a symbolic link; refusing it`);
+  if (!st.isFile()) fail(`${what} ${file} is not a regular file; refusing it`);
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  if (own && uid !== null && st.uid !== uid) fail(`${what} ${file} is owned by uid ${st.uid}, not by this user (uid ${uid}); refusing it`);
+  if (st.size > MAX_FILE_BYTES) fail(`${what} ${file} is larger than ${MAX_FILE_BYTES} bytes; refusing it`);
+}
+
+// Reads a ledger, lock or inbox file through one open file: it is opened without following a
+// symlink and without blocking on a FIFO, its type, owner (with `own`) and size are checked on the
+// open file, and the content is read from it, so a swap between check and read changes nothing.
+// Returns { content, st } with the checked stat, or null when the file does not exist. When the open
+// fails with a permission error, the path is examined without following links: another user's file
+// or one that is no regular file is refused as unsafe, and an own regular file gives the open error.
+// Other open and read errors are thrown as they are.
+function openCheckedFile(file, what, { own = true, encoding } = {}) {
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | OPEN_NOFOLLOW | OPEN_NONBLOCK);
+  } catch (e) {
+    if (errCode(e) === 'ENOENT') return null;
+    if (errCode(e) === 'ELOOP' || errCode(e) === 'EMLINK') fail(`${what} ${file} is a symbolic link; refusing it`);
+    if (errCode(e) === 'EACCES' || errCode(e) === 'EPERM') {
+      const st = lstatOrNull(file);
+      if (st) checkFileStat(st, file, what, true);
+    }
+    throw e;
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    checkFileStat(st, file, what, own);
+    return { content: fs.readFileSync(fd, encoding), st };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function readCheckedFile(file, what, opts) {
+  const r = openCheckedFile(file, what, opts);
+  return r === null ? null : r.content;
+}
+
+// Reads and validates the ledger. `ledgerBytes` are the raw bytes, so a restore writes back exactly
+// what was read.
+function readLedgerFile(ledgerFile) {
+  let L;
+  let ledgerBytes;
+  try {
+    ledgerBytes = readCheckedFile(ledgerFile, 'ledger');
+    if (ledgerBytes === null) fail(`cannot read ledger ${ledgerFile}: no such file`);
+    L = JSON.parse(ledgerBytes.toString('utf8'));
+  } catch (e) {
+    if (e instanceof Failure) throw e;
+    fail(`cannot read ledger ${ledgerFile}: ${e.message}`);
+  }
+  validateLedger(L);
+  return { L, ledgerBytes };
+}
+
+// Re-reads the ledger, applies `change` to that fresh copy and writes it. The caller holds the lock
+// guard, so no write undoes a change another command made in between. Returns what `change` returns.
+function updateLedgerGuarded(ctx, change) {
+  Object.assign(ctx, readLedgerFile(ctx.ledgerFile));
+  const result = change(ctx.L);
+  persistLedger(ctx);
+  return result;
+}
+
+const updateLedger = (ctx, change) => withLockGuard(ctx, () => updateLedgerGuarded(ctx, change));
+
+// The ledger's run-level agent overrides, or null when it has none.
+function agentsOf(L) {
+  if (L.agents === undefined || L.agents === null) return null;
+  const a = L.agents;
+  const valid = a && typeof a === 'object' && !Array.isArray(a)
+    && Object.keys(a).every(k => AGENT_ROLES.includes(k) && typeof a[k] === 'string' && AGENT_NAME_RE.test(a[k]));
+  if (!valid) fail(`invalid agents in the ledger: expected an object with optional ${AGENT_ROLES.join(' and ')} matching ${AGENT_NAME_RE}`);
+  return a;
 }
 
 function validateLedger(L) {
@@ -177,7 +268,7 @@ function validateLedger(L) {
   }
   for (const t of L.tasks) {
     if (!t || typeof t !== 'object' || typeof t.id !== 'string' || !ID_RE.test(t.id)) {
-      fail(`unsafe task id ${JSON.stringify(t && t.id)}: must match ${ID_RE}`);
+      fail(`invalid task id ${t && typeof t === 'object' ? String(t.id) : String(t)}: unsafe for paths and git, must match ${ID_RE}`);
     }
     if (t.dependsOn !== undefined && t.dependsOn !== null) {
       if (!Array.isArray(t.dependsOn)) fail(`unsafe dependsOn of ${t.id}: not an array`);
@@ -193,6 +284,7 @@ function listing(L) {
     const o = {};
     for (const k of LISTING_LISTS) o[k] = Array.isArray(t[k]) ? t[k] : [];
     for (const k of LISTING_SCALARS) o[k] = t[k] === undefined ? null : t[k];
+    o.needsAcceptance = t.needsAcceptance === true;
     return o;
   });
 }
@@ -234,12 +326,22 @@ function baseRefOf(ctx, t) {
 
 // ---- lock --------------------------------------------------------------------------------------
 
-function readLockText(ctx) {
+// The lock file as { bytes, text, unreadable, unsafe }: `bytes` and `text` are null when there is no
+// lock or it cannot be read; `unreadable` says why a lock file that exists cannot be read; `unsafe`
+// marks a lock that is no regular file of this user and is never read or replaced.
+function lockState(ctx) {
   try {
-    return fs.readFileSync(ctx.lockFile, 'utf8');
-  } catch {
-    return null;
+    const bytes = readCheckedFile(ctx.lockFile, 'lock');
+    return { bytes, text: bytes === null ? null : bytes.toString('utf8'), unreadable: null, unsafe: false };
+  } catch (e) {
+    return { bytes: null, text: null, unreadable: e.message, unsafe: e instanceof Failure };
   }
+}
+
+function readLockText(ctx) {
+  const state = lockState(ctx);
+  if (state.unsafe) fail(state.unreadable);
+  return state.text;
 }
 
 function parseLock(text) {
@@ -267,54 +369,210 @@ const errCode = e => e && e.code;
 
 const sleepMs = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-// Removes a guard file older than GUARD_STALE_MS, left behind by a crashed caller. The guard is
-// renamed aside first (only one caller can do that); when the file moved aside turns out to be a
-// newer guard than the one judged abandoned, it is linked back.
-function breakAbandonedGuard(guard, token) {
-  let judged;
+let asideCount = 0;
+
+// What identifies a guard judged abandoned: its text, or for a guard that cannot be read (text
+// null) its file identity and time.
+const sameGuard = (expected, text, st) =>
+  expected.text !== null
+    ? text === expected.text
+    : text === null && st !== null && st.dev === expected.dev && st.ino === expected.ino && st.mtimeMs === expected.mtimeMs;
+
+const readOrNull = file => {
   try {
-    judged = fs.statSync(guard);
+    return fs.readFileSync(file, 'utf8');
   } catch {
-    return;
+    return null;
   }
-  if (Date.now() - judged.mtimeMs < GUARD_STALE_MS) return;
-  const aside = `${guard}.abandoned-${token}`;
+};
+
+const lstatOrNull = file => {
+  try {
+    return fs.lstatSync(file);
+  } catch {
+    return null;
+  }
+};
+
+// Opens a guard file (the guard path, a guard moved aside, or a private guard file) without following
+// a link and without blocking, and reads it only when the open file is a regular file. Returns null
+// when nothing is there, otherwise { st, text, regular }: `text` is null when the file is no regular
+// file (it is never read) or cannot be read; `st` is that of the open file, or of the path when it
+// cannot be opened. For a regular file, `keep(st, text)` (when given) runs while the file is still open.
+function openGuardFile(file, keep) {
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | OPEN_NOFOLLOW | OPEN_NONBLOCK);
+  } catch (e) {
+    if (errCode(e) === 'ENOENT') return null;
+    const st = lstatOrNull(file);
+    return st && { st, text: null, regular: st.isFile() };
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return { st, text: null, regular: false };
+    const text = readOrNull(fd);
+    if (keep) keep(st, text);
+    return { st, text, regular: true };
+  } catch {
+    return null;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// Moves the guard aside under a name unique to this caller and removes it only when it is the
+// `expected` guard. Any other guard is linked back when the guard path is still free and otherwise
+// left where it is; it is never deleted. Something that is no regular file is never the expected
+// guard: it is put back (a directory by renaming, while the guard path is free). Returns whether the
+// expected guard was removed.
+function removeGuardIf(guard, token, expected) {
+  const aside = `${guard}.aside-${token}-${++asideCount}`;
   try {
     fs.renameSync(guard, aside);
   } catch {
-    return;
+    return false;
+  }
+  const moved = openGuardFile(aside);
+  if (moved && moved.regular && sameGuard(expected, moved.text, moved.text === null ? moved.st : null)) {
+    fs.rmSync(aside, { force: true });
+    return true;
   }
   try {
-    if (fs.statSync(aside).ino !== judged.ino) fs.linkSync(aside, guard);
-  } catch {}
+    fs.linkSync(aside, guard);
+  } catch {
+    try {
+      if (moved && moved.st.isDirectory() && lstatOrNull(guard) === null) fs.renameSync(aside, guard);
+    } catch {
+      // Left aside; it is never deleted.
+    }
+    return false;
+  }
+  // The guard is back under its own name; this drops only the second name.
   fs.rmSync(aside, { force: true });
+  return false;
 }
 
-// Runs fn while holding the lock guard `<lock>.guard`, an exclusively created file, so that at
-// most one caller at a time reads, judges and writes the run lock.
+// The owner a guard names ({ token, pid, host, at }), or null for content in another form.
+function guardOwner(text) {
+  try {
+    const g = JSON.parse(text);
+    return g && typeof g === 'object' && typeof g.token === 'string' ? g : null;
+  } catch {
+    return null;
+  }
+}
+
+// True only when asking for the process reports that no such process exists.
+const processGone = pid => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return errCode(e) === 'ESRCH';
+  }
+};
+
+// A guard (or a private guard file) is abandoned when it is older than GUARD_ABANDON_MS, or when the
+// process on this machine that it names no longer exists. Its age is that of the file, or the
+// creation time it names when that is older and it names this machine. A guard that cannot be
+// read, or names no owner, counts only by the age of its file; so does one naming another host.
+function guardAbandoned(text, mtimeMs) {
+  const now = Date.now();
+  if (now - mtimeMs > GUARD_ABANDON_MS) return true;
+  const owner = text ? guardOwner(text) : null;
+  if (!owner || owner.host !== os.hostname()) return false;
+  if (Number.isFinite(owner.at) && now - owner.at > GUARD_ABANDON_MS) return true;
+  return processGone(owner.pid);
+}
+
+// Removes a guard left behind by a crashed caller. Its content and age are read from one open
+// file, so what is recorded is the guard judged abandoned; a guard that replaced it in the meantime
+// carries another token and survives. Something at the guard path that is no regular file (a FIFO,
+// a directory, a socket, a link) is a guard held by an unknown owner: it is never read, moved or
+// removed, so waiting for it ends with the guard-wait timeout.
+function breakAbandonedGuard(guard, token) {
+  const g = openGuardFile(guard);
+  if (!g || !g.regular || !guardAbandoned(g.text, g.st.mtimeMs)) return;
+  removeGuardIf(guard, token, { text: g.text, dev: g.st.dev, ino: g.st.ino, mtimeMs: g.st.mtimeMs });
+}
+
+// Removes private guard files (`<guard>-new-<token>`, the files linked to create a guard) left by
+// callers that are gone or older than GUARD_ABANDON_MS. A live caller's file is kept.
+function removeAbandonedPrivateFiles(guard) {
+  const dir = path.dirname(guard);
+  const prefix = `${path.basename(guard)}-new-`;
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const file = path.join(dir, name);
+    const g = openGuardFile(file);
+    if (g && g.regular && guardAbandoned(g.text, g.st.mtimeMs)) fs.rmSync(file, { force: true });
+  }
+}
+
+// Removes the guard only while it is the one this caller created: the token is confirmed on the
+// open file, and the path must still name that same file. A guard carrying another token, or
+// anything that is no regular file, is never removed.
+function releaseGuard(guard, content) {
+  openGuardFile(guard, (held, text) => {
+    if (text !== content) return;
+    const now = lstatOrNull(guard);
+    if (now && now.dev === held.dev && now.ino === held.ino) fs.rmSync(guard, { force: true });
+  });
+}
+
+// Hard links are named only when the link step itself failed; otherwise the system error is.
+const cannotCreateGuard = (guard, e, linking) =>
+  fail(`cannot create guard ${guard}: ${errCode(e) || 'error'}: ${e.message}${linking ? '; the file system must support hard links' : ''}`);
+
+// Runs fn while holding the lock guard `<lock>.guard`, so that at most one caller at a time reads,
+// judges and writes the run lock and the ledger. The guard's content (token, owner pid, host,
+// creation time) is written to a private file first, which is then linked to the guard path; the
+// link fails while a guard exists, and a guard never exists without its token.
 function withLockGuard(ctx, fn) {
   const guard = `${ctx.lockFile}.guard`;
   const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const content = JSON.stringify({ token, pid: process.pid, host: os.hostname(), at: Date.now() }) + '\n';
+  const fresh = `${guard}-new-${token}`;
   const deadline = Date.now() + GUARD_WAIT_MAX_MS;
-  for (;;) {
-    try {
-      fs.writeFileSync(guard, token, { flag: 'wx' });
-      break;
-    } catch (e) {
-      if (errCode(e) !== 'EEXIST') throw e;
+  try {
+    fs.writeFileSync(fresh, content, { flag: 'wx', mode: 0o600 });
+  } catch (e) {
+    cannotCreateGuard(guard, e, false);
+  }
+  try {
+    let waited = false;
+    for (;;) {
+      try {
+        fs.linkSync(fresh, guard);
+        break;
+      } catch (e) {
+        if (errCode(e) !== 'EEXIST') cannotCreateGuard(guard, e, true);
+      }
+      if (!waited) {
+        waited = true;
+        removeAbandonedPrivateFiles(guard);
+      }
+      breakAbandonedGuard(guard, token);
+      if (Date.now() > deadline) {
+        fail(`another run (unknown, holding the lock guard ${guard}) is using the run lock of this ledger; try again`, { locked: true });
+      }
+      sleepMs(5 + Math.floor(Math.random() * 20));
     }
-    breakAbandonedGuard(guard, token);
-    if (Date.now() > deadline) {
-      fail(`another run (unknown, holding the lock guard ${guard}) is using the run lock of this ledger; try again`, { locked: true });
-    }
-    sleepMs(5 + Math.floor(Math.random() * 20));
+  } finally {
+    fs.rmSync(fresh, { force: true });
   }
   try {
     return fn();
   } finally {
-    try {
-      if (fs.readFileSync(guard, 'utf8') === token) fs.rmSync(guard, { force: true });
-    } catch {}
+    releaseGuard(guard, content);
   }
 }
 
@@ -330,75 +588,112 @@ const processAlive = pid => {
 
 // Takes the lock under the guard. A live foreign lock is refused unless `takeover` is given.
 // `takeover` replaces the lock of a run, not one a concurrent prepare has just taken: it refuses a
-// lock written since this call started and a lock whose prepare is still running.
-// Returns { previous, written, tookOver }: the lock text before the call (null when there was none),
-// the text this call wrote, and whether it replaced a live foreign lock; the written lock is marked
+// lock whose prepare is still running and, without `heldRunId`, a lock written since this call
+// started. A lock file that exists but cannot be read or parsed counts as held by an unknown live
+// run: only a bare `takeover` replaces it, and a lock that is no regular file of this user is never
+// replaced. With `heldRunId`, a lock of another run that does not name `heldRunId` is refused.
+// Returns { previous, backup, written, tookOver }: the lock bytes before the call (null when there
+// were none or they could not be read), the name the unreadable lock was moved aside to, the text
+// this call wrote, and whether it replaced a live foreign lock; the written lock is marked
 // `preparing` until settleLock.
-function acquireLock(ctx, runId, takeover) {
+function acquireLock(ctx, runId, takeover, heldRunId) {
   return withLockGuard(ctx, () => {
-    const previous = readLockText(ctx);
-    const held = previous === null ? null : parseLock(previous);
+    const state = lockState(ctx);
+    const previous = state.bytes;
+    const held = state.text === null ? null : parseLock(state.text);
+    const unknown = state.unreadable !== null || (state.text !== null && held === null);
+    if (unknown && (state.unsafe || !takeover || heldRunId !== undefined)) {
+      const why = state.unreadable !== null ? state.unreadable : `lock ${ctx.lockFile} cannot be parsed`;
+      const replace = heldRunId === undefined ? 'only a bare takeover replaces a lock that cannot be read' : `a takeover of ${heldRunId} does not replace it`;
+      fail(`another run (unknown, ${why}) may hold this ledger; ${state.unsafe ? 'it is never replaced' : replace}`, { locked: true });
+    }
+    if (heldRunId !== undefined && held && held.runId !== runId && held.runId !== heldRunId) lockedFailure(held);
     const tookOver = Boolean(isLiveForeign(held, runId));
     if (tookOver) {
       const at = Number(held.at);
-      const sinceStart = at >= ctx.startedAt && at <= Date.now();
+      const sinceStart = heldRunId === undefined && at >= ctx.startedAt && at <= Date.now();
       const preparing = held.preparing === true && processAlive(held.pid);
       if (!takeover || sinceStart || preparing) lockedFailure(held);
+    }
+    // A lock whose bytes cannot be read is moved aside whole, so a failed prepare can put it back.
+    let backup = null;
+    if (unknown && previous === null) {
+      backup = `${ctx.lockFile}.replaced-${process.pid}-${Date.now()}`;
+      fs.renameSync(ctx.lockFile, backup);
     }
     const at = Date.now();
     const written = JSON.stringify({ runId, at, pid: process.pid, preparing: true }) + '\n';
     writeAtomic(ctx.lockFile, written);
-    return { previous, written, runId, at, tookOver };
+    return { previous, backup, written, runId, at, tookOver };
   });
 }
 
 // Drops the `preparing` mark once prepare has succeeded, unless another call has replaced the lock.
-function settleLock(ctx, { written, runId, at }) {
+function settleLock(ctx, { backup, written, runId, at }) {
   withLockGuard(ctx, () => {
+    if (backup !== null) fs.rmSync(backup, { force: true });
     if (readLockText(ctx) === written) writeAtomic(ctx.lockFile, JSON.stringify({ runId, at }) + '\n');
   });
 }
 
-// Puts back the lock that was there before acquireLock, unless another call has replaced ours since.
-function restoreLock(ctx, { previous, written }) {
+// Puts back the exact lock that was there before acquireLock, unless another call has replaced ours
+// since.
+function restoreLock(ctx, { previous, backup, written }) {
   withLockGuard(ctx, () => {
     if (readLockText(ctx) !== written) return;
-    if (previous === null) fs.rmSync(ctx.lockFile, { force: true });
+    if (backup !== null) fs.renameSync(backup, ctx.lockFile);
+    else if (previous === null) fs.rmSync(ctx.lockFile, { force: true });
     else writeAtomic(ctx.lockFile, previous);
   });
 }
 
-// Runs `write` and removes the lock, all under the guard. With a runId, a live lock of another run
-// fails the call before anything is written, and only a lock naming that run is removed.
-function finishUnderLock(ctx, runId, write) {
+// Applies `change` to the freshly read ledger and removes the lock, all under the guard. Before
+// anything is written, the lock path must be absent or a regular file of this user. With a runId, a
+// live lock of another run, or a lock that cannot be read, fails the call before anything is
+// written, and only a lock naming that run is removed. A lock that is read but cannot be parsed
+// names no run, so it is left in place (as kept tests pin).
+function finishUnderLock(ctx, runId, change) {
   withLockGuard(ctx, () => {
-    const lock = runId === undefined ? null : readLock(ctx);
+    const st = lstatOrNull(ctx.lockFile);
+    if (st) checkFileStat(st, ctx.lockFile, 'lock', true);
+    let lock = null;
+    if (runId !== undefined) {
+      const state = lockState(ctx);
+      if (state.unsafe) fail(state.unreadable);
+      if (state.unreadable !== null) {
+        fail(`another run (unknown, ${state.unreadable}) may hold this ledger; finish of ${runId} changed nothing (locked: true)`, { locked: true });
+      }
+      lock = state.text === null ? null : parseLock(state.text);
+    }
     if (runId !== undefined && isLiveForeign(lock, runId)) {
       const age = Math.round((Date.now() - Number(lock.at)) / 60000);
       fail(`another run (${lock.runId}, heartbeat ${age} min ago) holds this ledger; finish of ${runId} changed nothing (locked: true)`, { locked: true });
     }
-    write();
+    updateLedgerGuarded(ctx, change);
     if (runId === undefined || (lock && lock.runId === runId)) fs.rmSync(ctx.lockFile, { force: true });
   });
 }
 
-// Sets the lock's `at` to now, keeping its runId. With a runId, only that run's lock is refreshed.
-function refreshLock(ctx, runId) {
-  withLockGuard(ctx, () => {
-    const lock = readLock(ctx);
-    if (!lock) return;
-    if (runId !== undefined && lock.runId !== runId) return;
-    writeAtomic(ctx.lockFile, JSON.stringify({ ...lock, at: Date.now() }) + '\n');
-  });
+// Sets the lock's `at` to now, keeping its runId, but only while the lock names `runId`. Without a
+// runId nothing is refreshed. The caller holds the guard.
+function refreshLockGuarded(ctx, runId) {
+  if (runId === undefined) return;
+  const lock = readLock(ctx);
+  if (!lock || lock.runId !== runId) return;
+  writeAtomic(ctx.lockFile, JSON.stringify({ ...lock, at: Date.now() }) + '\n');
 }
 
 // ---- inbox -------------------------------------------------------------------------------------
 
 // Reads the inbox and appends its valid entries to ctx.L.tasks. Returns the added ids and a
-// `consume` function that renames the inbox once the caller has saved the ledger.
+// `consume(written)` function that renames the inbox once the caller has saved the ledger as the
+// text `written`. Callers hold the lock guard from reading the ledger to consuming the inbox.
 function ingestInbox(ctx) {
-  if (!fs.existsSync(ctx.inboxFile)) return { added: [], consume: () => {} };
-  const text = fs.readFileSync(ctx.inboxFile, 'utf8');
+  // Anyone who can write the inbox may have written it, so its owner is not checked; a FIFO or a
+  // symlink is still refused.
+  const read = openCheckedFile(ctx.inboxFile, 'inbox', { own: false, encoding: 'utf8' });
+  if (read === null) return { added: [], consume: () => [] };
+  const text = read.content;
   const taken = new Set(ctx.L.tasks.map(t => t.id));
   // BigInt keeps every generated id of the form T<n> and every increment effective, however long
   // the ledger's ids are, so the loop below always terminates.
@@ -422,6 +717,13 @@ function ingestInbox(ctx) {
 
     const stored = {};
     for (const k of TASK_KEYS) if (Object.prototype.hasOwnProperty.call(o, k)) stored[k] = o[k];
+    // A line without an acceptance is kept, marked so that the engine does not start it; the
+    // inbox itself never sets the mark.
+    delete stored.needsAcceptance;
+    if (typeof o.acceptance !== 'string' || o.acceptance.trim() === '') {
+      stored.acceptance = '';
+      stored.needsAcceptance = true;
+    }
     let id = typeof o.id === 'string' && INBOX_ID_RE.test(o.id) && !taken.has(o.id) ? o.id : null;
     if (!id) {
       do next++;
@@ -438,12 +740,43 @@ function ingestInbox(ctx) {
     added.push(id);
   }
 
-  const consume = () => {
+  // When the inbox cannot be moved aside, the ledger gets back its bytes from before this call and
+  // the inbox stays, so a later call ingests each line exactly once. That restore happens only
+  // while the ledger still holds what this call wrote; an inbox that is gone, whatever the error,
+  // has nothing left to process twice. Returns warnings for the answer.
+  const consume = written => {
     const kept = `${ctx.inboxFile}.ingested-${Date.now()}`;
-    fs.renameSync(ctx.inboxFile, kept);
-    // Lines appended after the read above go back into a fresh inbox.
-    const now = fs.readFileSync(kept, 'utf8');
+    try {
+      fs.renameSync(ctx.inboxFile, kept);
+    } catch (e) {
+      if (!fs.existsSync(ctx.inboxFile)) return [];
+      let outcome = 'the ledger is unchanged';
+      if (written !== undefined) {
+        let current = null;
+        try {
+          current = readCheckedFile(ctx.ledgerFile, 'ledger', { encoding: 'utf8' });
+        } catch {
+          // Not the ledger this call wrote.
+        }
+        if (current === written) writeAtomic(ctx.ledgerFile, ctx.ledgerBytes);
+        else outcome = 'the ledger was not restored';
+      }
+      fail(`cannot move the inbox ${ctx.inboxFile} aside: ${e.message}; ${outcome}`);
+    }
+    // Lines appended after the read above go back into a fresh inbox. The moved file is read only
+    // when it is the regular file read above, through the same checked read.
+    let now = null;
+    try {
+      const moved = openCheckedFile(kept, 'moved inbox', { own: false, encoding: 'utf8' });
+      if (moved && moved.st.dev === read.st.dev && moved.st.ino === read.st.ino) now = moved.content;
+    } catch {
+      // Skipped below.
+    }
+    if (now === null) {
+      return [`the moved inbox ${kept} is not the file that was read; lines appended to it after the read were not carried over`];
+    }
     if (now.length > text.length && now.startsWith(text)) fs.appendFileSync(ctx.inboxFile, now.slice(text.length));
+    return [];
   };
   return { added, consume };
 }
@@ -452,29 +785,34 @@ function ingestInbox(ctx) {
 
 function opFinish(ctx, [runStatus, reason, runId]) {
   if (!RUN_STATUSES.includes(runStatus)) fail(`bad runStatus ${runStatus}: expected one of ${RUN_STATUSES.join(', ')}`);
-  finishUnderLock(ctx, runId, () => {
-    ctx.L.runStatus = runStatus;
-    ctx.L.stopReason = reason === undefined || reason === '' ? null : reason;
-    persistLedger(ctx);
+  finishUnderLock(ctx, runId, L => {
+    L.runStatus = runStatus;
+    L.stopReason = reason === undefined || reason === '' ? null : reason;
   });
   return { runStatus, tasks: listing(ctx.L) };
 }
 
 function opStatus(ctx, [id, status, evidence]) {
-  const t = findTask(ctx, id);
+  findTask(ctx, id);
   if (!SETTABLE.includes(status)) fail(`status ${status} not settable: expected one of ${SETTABLE.join(', ')}`);
-  t.status = status;
-  if (evidence !== undefined) t.evidence = String(evidence).slice(0, EVIDENCE_MAX);
-  persistLedger(ctx);
+  updateLedger(ctx, () => {
+    const t = findTask(ctx, id);
+    t.status = status;
+    if (evidence !== undefined) t.evidence = String(evidence).slice(0, EVIDENCE_MAX);
+  });
   return { id, status };
 }
 
+// Ingests the inbox and refreshes the lock under the guard, so overlapping calls process the inbox one after
+// the other from the ledger as the previous one left it.
 function opSync(ctx, [runId]) {
-  const { added, consume } = ingestInbox(ctx);
-  if (added.length) persistLedger(ctx);
-  consume();
-  refreshLock(ctx, runId);
-  return { added, tasks: listing(ctx.L) };
+  return withLockGuard(ctx, () => {
+    refreshLockGuarded(ctx, runId);
+    Object.assign(ctx, readLedgerFile(ctx.ledgerFile));
+    const { added, consume } = ingestInbox(ctx);
+    const warnings = consume(added.length ? persistLedger(ctx) : undefined);
+    return { added, tasks: listing(ctx.L), ...(warnings.length ? { warnings } : {}) };
+  });
 }
 
 // Does `from` reach `to` through dependsOn, transitively?
@@ -503,6 +841,7 @@ function overlapWarnings(L) {
     for (let j = i + 1; j < tasks.length; j++) {
       const a = tasks[i];
       const b = tasks[j];
+      if (a.status === 'merged' || b.status === 'merged') continue;
       if (!globListsOverlap(a.files, b.files)) continue;
       if (reaches(L, a.id, b.id) || reaches(L, b.id, a.id)) continue;
       warnings.push(`${a.id} and ${b.id} have overlapping files globs but no dependsOn path links them; their merges may conflict`);
@@ -511,10 +850,14 @@ function overlapWarnings(L) {
   return warnings;
 }
 
-function opPrepare(ctx, [runId, takeover]) {
+// prepare <runId> [takeover [heldRunId]]
+function opPrepare(ctx, [runId, takeover, heldRunId]) {
   if (typeof runId !== 'string' || !RUN_ID_RE.test(runId)) fail(`bad runId ${JSON.stringify(runId)}: must match ${RUN_ID_RE}`);
+  if (takeover !== 'takeover') heldRunId = undefined;
+  if (heldRunId !== undefined && !RUN_ID_RE.test(heldRunId)) fail(`bad held runId ${JSON.stringify(heldRunId)}: must match ${RUN_ID_RE}`);
+  agentsOf(ctx.L);
 
-  const lock = acquireLock(ctx, runId, takeover === 'takeover');
+  const lock = acquireLock(ctx, runId, takeover === 'takeover', heldRunId);
 
   try {
     const { root, L } = ctx;
@@ -528,9 +871,6 @@ function opPrepare(ctx, [runId, takeover]) {
       const f = git(root, 'fetch', '-q', 'origin');
       if (f.status !== 0) warnings.push(`git fetch origin failed: ${(f.stderr || f.stdout).trim()}`);
     }
-
-    const { added, consume } = ingestInbox(ctx);
-    for (const t of L.tasks) if (t.status === 'in_progress' || t.status === 'done') t.status = 'todo';
 
     const start = resolveStartRef(ctx);
     const intBranch = integrationBranchName(ctx);
@@ -554,13 +894,22 @@ function opPrepare(ctx, [runId, takeover]) {
       warnings.push('.claude/worktrees/ is not gitignored; add it to .gitignore so task worktrees stay out of the main checkout');
     }
 
-    warnings.push(...overlapWarnings(L));
-
-    L.runStatus = 'running';
-    L.stopReason = null;
-    L.integrationBranch = intBranch;
-    persistLedger(ctx);
-    consume();
+    // Ingestion, the run state and the ledger write happen under the guard, from the ledger as it
+    // is now; overlap warnings include the tasks just added. Every check of that fresh copy runs
+    // before the write, so after it only the answer is built.
+    let agents;
+    const added = withLockGuard(ctx, () => {
+      Object.assign(ctx, readLedgerFile(ctx.ledgerFile));
+      agents = agentsOf(ctx.L);
+      const { added: ids, consume } = ingestInbox(ctx);
+      for (const t of ctx.L.tasks) if (t.status === 'in_progress' || t.status === 'done') t.status = 'todo';
+      warnings.push(...overlapWarnings(ctx.L));
+      ctx.L.runStatus = 'running';
+      ctx.L.stopReason = null;
+      ctx.L.integrationBranch = intBranch;
+      warnings.push(...consume(persistLedger(ctx)));
+      return ids;
+    });
     // A racing takeover that started late still finds this lock `preparing` and is refused.
     if (lock.tookOver) sleepMs(Math.max(0, lock.at + TAKEOVER_SETTLE_MS - Date.now()));
     try {
@@ -569,7 +918,7 @@ function opPrepare(ctx, [runId, takeover]) {
       // The mark is harmless once this process has exited.
     }
 
-    return { added, integration, prs: L.prs === true, root, start, tasks: listing(L), warnings };
+    return { added, agents, integration, prs: ctx.L.prs === true, root, start, tasks: listing(ctx.L), warnings };
   } catch (e) {
     restoreLock(ctx, lock);
     throw e;
@@ -624,11 +973,7 @@ function opWorktree(ctx, [id]) {
     }
   }
 
-  t.status = 'in_progress';
-  t.branch = branch;
-  t.base = base;
-  t.worktree = worktree;
-  persistLedger(ctx);
+  updateLedger(ctx, () => Object.assign(findTask(ctx, id), { status: 'in_progress', branch, base, worktree }));
   return { id, branch, base, worktree };
 }
 
@@ -640,31 +985,36 @@ function taskWorktree(ctx, t) {
   return worktreeOfBranch(ctx.root, taskBranch(ctx, t.id));
 }
 
-function readVerifyCmd(dir) {
-  try {
-    return fs.readFileSync(path.join(dir, '.claude', 'verify.cmd'), 'utf8').trim();
-  } catch {
-    return '';
-  }
+// The verify command committed on the task's base ref, never the copy in a worktree. A missing or
+// empty one fails the call; no check is ever skipped.
+function baseVerifyCmd(ctx, t) {
+  const baseRef = baseRefOf(ctx, t);
+  const r = git(ctx.root, 'show', `${baseRef}:.claude/verify.cmd`);
+  if (r.status !== 0) fail(`${t.id}: .claude/verify.cmd is not tracked on the base ${baseRef}; commit it there before verifying`);
+  const command = r.stdout.trim();
+  if (!command) fail(`${t.id}: .claude/verify.cmd is empty on ${baseRef}; commit a check there before verifying`);
+  return command;
 }
 
-// Refuses a task whose branch changes .claude/verify.cmd since it left its base: a task must not
-// rewrite the check that judges it.
+// Refuses a task whose branch changes .claude/verify.cmd since it left its base, in any spelling of
+// upper and lower case: a task must not rewrite the check that judges it.
 function refuseVerifyCmdChange(ctx, t) {
   const branch = taskBranch(ctx, t.id);
   const baseRef = baseRefOf(ctx, t);
-  const d = git(ctx.root, 'diff', '--quiet', `${baseRef}...refs/heads/${branch}`, '--', '.claude/verify.cmd');
-  if (d.status === 0) return;
-  if (d.status === 1) {
-    fail(`${t.id}: ${branch} modifies .claude/verify.cmd compared with ${baseRef}; change verify.cmd outside a run, then retry the task`);
+  const d = git(ctx.root, 'diff', '--name-only', '--no-renames', '-z', `${baseRef}...refs/heads/${branch}`);
+  if (d.status !== 0) fail(`${t.id}: cannot compare .claude/verify.cmd of ${branch} with ${baseRef}: ${(d.stderr || d.stdout).trim()}`);
+  const changed = d.stdout.split('\0').find(p => p.toLowerCase() === '.claude/verify.cmd');
+  if (changed) {
+    fail(`${t.id}: ${branch} modifies ${changed} compared with ${baseRef}; change verify.cmd outside a run, then retry the task`);
   }
-  fail(`${t.id}: cannot compare .claude/verify.cmd of ${branch} with ${baseRef}: ${(d.stderr || d.stdout).trim()}`);
 }
 
 function opVerify(ctx, [id]) {
   const t = findTask(ctx, id);
   const worktree = taskWorktree(ctx, t);
   if (!worktree) fail(`worktree for ${id} missing`);
+  refuseVerifyCmdChange(ctx, t);
+  const command = baseVerifyCmd(ctx, t);
 
   const branch = taskBranch(ctx, id);
   const baseRef = baseRefOf(ctx, t);
@@ -675,10 +1025,7 @@ function opVerify(ctx, [id]) {
   if (st.status !== 0) fail(`git status failed in ${worktree}: ${st.stderr.trim()}`);
   const dirty = st.stdout.split('\n').filter(Boolean);
   if (dirty.length) fail(`${id}: uncommitted changes in ${worktree}`, { dirty });
-  refuseVerifyCmdChange(ctx, t);
 
-  const command = readVerifyCmd(worktree);
-  if (!command) fail(`${id}: .claude/verify.cmd is missing or empty in ${worktree}`);
   const c = shellCheck(ctx.L, command, worktree);
   if (!c.ok) fail(`${id}: verify.cmd exited ${c.code}`, { tail: c.tail });
 
@@ -686,6 +1033,39 @@ function opVerify(ctx, [id]) {
 }
 
 const appendEvidence = (old, text) => (old ? `${old} | ${text}` : text).slice(0, EVIDENCE_MAX);
+
+// Marks the task merged in the freshly read ledger, appending `text` to its evidence.
+function markMerged(ctx, id, text) {
+  updateLedger(ctx, () => {
+    const t = findTask(ctx, id);
+    t.status = 'merged';
+    t.evidence = appendEvidence(t.evidence, text);
+  });
+}
+
+// The paths that git names, as it prints them without quotes, when untracked files block a merge:
+// files that would be overwritten or removed, and directories that would lose untracked files (git
+// run with LC_ALL=C).
+function untrackedBlockers(output) {
+  const lines = output.split(/\r?\n/);
+  const paths = [];
+  const add = p => {
+    if (p && !paths.includes(p)) paths.push(p);
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    const single = /untracked working tree file '(.+)' would be (?:overwritten|removed) by merge/i.exec(l)
+      || /updating '(.+)' would lose untracked files in it/i.exec(l);
+    if (single) {
+      add(single[1]);
+      continue;
+    }
+    if (!/untracked working tree files would be (?:overwritten|removed) by merge|directories would lose untracked files in them/i.test(l)) continue;
+    for (i++; i < lines.length && /^\t/.test(lines[i]); i++) add(lines[i].slice(1));
+    i--;
+  }
+  return paths;
+}
 
 function opMerge(ctx, [id]) {
   const { L } = ctx;
@@ -699,55 +1079,54 @@ function opMerge(ctx, [id]) {
   if (!hasBranch(ctx.root, branch)) fail(`${id}: branch ${branch} does not exist`);
   refuseVerifyCmdChange(ctx, t);
 
+  // Already merged: nothing is merged, so no verify command is needed.
   if (git(integration, 'merge-base', '--is-ancestor', branch, 'HEAD').status === 0) {
     const sha = gitOk(integration, 'rev-parse', '--short', 'HEAD');
-    t.status = 'merged';
-    t.evidence = appendEvidence(t.evidence, `already in ${intBranch} @ ${sha}`);
-    persistLedger(ctx);
+    markMerged(ctx, id, `already in ${intBranch} @ ${sha}`);
     return { id, sha, already: true };
   }
 
   if (gitOk(integration, 'status', '--porcelain', '--untracked-files=no')) {
     fail(`integration worktree ${integration} has uncommitted changes to tracked files`);
   }
+  const checkCommand = baseVerifyCmd(ctx, t);
   const head = gitOk(integration, 'rev-parse', 'HEAD');
   const restore = () => {
     git(integration, 'merge', '--abort');
     git(integration, 'reset', '-q', '--hard', head);
   };
 
-  const m = git(integration, 'merge', '--no-ff', '--no-commit', '-q', branch);
-  if (m.status !== 0) {
-    const conflicts = git(integration, 'diff', '--name-only', '--diff-filter=U').stdout.split('\n').filter(Boolean);
-    restore();
-    fail(`${id} conflicts with already-merged tasks`, { conflicts, tail: tail(m.stdout + m.stderr) });
-  }
-
+  // After any failed merge the integration worktree is reset to its HEAD.
   const checks = [];
-  const checkCommand = readVerifyCmd(integration);
-  for (const [name, command] of [['setup', L.setup], ['verify', checkCommand], ['suite', L.suite]]) {
-    if (!command) continue;
-    const c = shellCheck(L, command, integration);
-    if (!c.ok) {
-      restore();
-      fail(`${id}: combined check failed after merging (${command}, exit ${c.code}); merge aborted`, { tail: c.tail });
+  try {
+    const m = run('git', ['merge', '--no-ff', '--no-commit', '-q', branch], integration, { env: { ...process.env, LC_ALL: 'C' } });
+    if (m.status !== 0) {
+      const output = m.stdout + m.stderr;
+      const blockers = untrackedBlockers(output);
+      if (blockers.length) fail(`${id}: untracked files in the integration worktree block the merge: ${blockers.slice(0, 5).join(', ')}`, { tail: tail(output) });
+      const conflicts = git(integration, 'diff', '--name-only', '--diff-filter=U').stdout.split('\n').filter(Boolean);
+      fail(`${id} conflicts with already-merged tasks`, { conflicts, tail: tail(output) });
     }
-    checks.push(`${name} passed`);
-  }
 
-  const title = typeof t.title === 'string' ? t.title : '';
-  const commit = git(integration, 'commit', '-q', '-m', `merge ${id}: ${title}`);
-  if (commit.status !== 0) {
+    for (const [name, command] of [['setup', L.setup], ['verify', checkCommand], ['suite', L.suite]]) {
+      if (!command) continue;
+      const c = shellCheck(L, command, integration);
+      if (!c.ok) fail(`${id}: combined check failed after merging (${command}, exit ${c.code}); merge aborted`, { tail: c.tail });
+      checks.push(`${name} passed`);
+    }
+
+    const title = typeof t.title === 'string' ? t.title : '';
+    const commit = git(integration, 'commit', '-q', '-m', `merge ${id}: ${title}`);
+    if (commit.status !== 0) fail(`${id}: merge commit failed: ${(commit.stdout + commit.stderr).trim()}`);
+  } catch (e) {
     restore();
-    fail(`${id}: merge commit failed: ${(commit.stdout + commit.stderr).trim()}`);
+    throw e;
   }
   // Checks may touch tracked files; the merge commit is what counts.
   if (gitOk(integration, 'status', '--porcelain', '--untracked-files=no')) git(integration, 'reset', '-q', '--hard', 'HEAD');
 
   const sha = gitOk(integration, 'rev-parse', '--short', 'HEAD');
-  t.status = 'merged';
-  t.evidence = appendEvidence(t.evidence, `merged into ${intBranch} @ ${sha}; checks: ${checks.join(', ') || 'none'}`);
-  persistLedger(ctx);
+  markMerged(ctx, id, `merged into ${intBranch} @ ${sha}; checks: ${checks.join(', ') || 'none'}`);
   return { id, sha };
 }
 
@@ -852,8 +1231,11 @@ function opPrs(ctx) {
     if (r.status !== 0 || !urls) {
       fail(`${label} create failed for ${t.id}: ${output || String(r.error || '')}`, { results });
     }
-    t.pr = urls[urls.length - 1];
-    persistLedger(ctx);
+    const pr = urls[urls.length - 1];
+    t.pr = pr;
+    updateLedger(ctx, () => {
+      findTask(ctx, t.id).pr = pr;
+    });
     results.push({ id: t.id, pr: t.pr, target });
   }
   return { results };
@@ -880,24 +1262,23 @@ function main(argv) {
   if (!cmd || !ledgerArg) fail(`usage: tasks-git.js <${Object.keys(COMMANDS).join('|')}> <ledger> [args...]`);
   if (!Object.prototype.hasOwnProperty.call(COMMANDS, cmd)) fail(`unknown command ${cmd}`);
 
+  if (ledgerArg.split(/[\\/]/).includes('..')) fail(`ledger path ${ledgerArg} contains a .. segment; refusing it`);
   const ledgerFile = path.resolve(ledgerArg);
   const runsDir = path.dirname(ledgerFile);
   const claudeDir = path.dirname(runsDir);
   if (path.basename(runsDir) !== 'runs' || path.basename(claudeDir) !== '.claude') {
     fail(`ledger ${ledgerFile} is not in <repo>/.claude/runs/`);
   }
-  const root = path.dirname(claudeDir);
-
-  let L;
-  try {
-    L = JSON.parse(fs.readFileSync(ledgerFile, 'utf8'));
-  } catch (e) {
-    fail(`cannot read ledger ${ledgerFile}: ${e.message}`);
+  // Every file of the run lives in these two directories; neither may lead elsewhere.
+  for (const dir of [claudeDir, runsDir]) {
+    const st = lstatOrNull(dir);
+    if (st && st.isSymbolicLink()) fail(`ledger directory ${dir} is a symbolic link; refusing it`);
   }
-  validateLedger(L);
+  const root = path.dirname(claudeDir);
+  const { L, ledgerBytes } = readLedgerFile(ledgerFile);
 
   const stem = ledgerFile.replace(/\.json$/, '');
-  const ctx = { root, ledgerFile, L, startedAt, lockFile: `${stem}.lock`, inboxFile: `${stem}.inbox.jsonl` };
+  const ctx = { root, ledgerFile, ledgerBytes, L, startedAt, lockFile: `${stem}.lock`, inboxFile: `${stem}.inbox.jsonl` };
   return COMMANDS[cmd](ctx, rest);
 }
 

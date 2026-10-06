@@ -3,7 +3,8 @@
 // abandoned guard does not block forever; sync refreshes only its own run's lock.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { hostname } from 'node:os';
 import { existsSync, readFileSync, readdirSync, utimesSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { SCRIPT, sandbox, task } from './helpers/git-sandbox.mjs';
@@ -97,7 +98,8 @@ test('a fresh guard makes prepare wait; it proceeds once the guard is released',
 
 test('an abandoned guard is broken after a short fixed time', t => {
   const sb = sandbox(t, { tasks: [task('T1')] });
-  writeFileSync(guardOf(sb), 'crashed-caller');
+  const gone = spawnSync(process.execPath, ['-e', '0']).pid;
+  writeFileSync(guardOf(sb), JSON.stringify({ token: 'crashed-caller', pid: gone, host: hostname(), at: Date.now() }) + '\n');
   const old = new Date(Date.now() - 60 * 1000);
   utimesSync(guardOf(sb), old, old);
   const started = Date.now();
