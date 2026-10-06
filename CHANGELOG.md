@@ -54,6 +54,31 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ## tasks-ledger
 
+### [0.4.1] - 2026-10-06
+
+#### Security
+
+- Atomic writes of the ledger and the run lock create their temporary file exclusively and never follow a
+  symbolic link at that name. The name now carries a random part. When something already exists there,
+  the write fails, nothing outside the runs directory is written, and the target is unchanged.
+- Lines appended to the inbox while `sync` was reading it are carried over only into a new inbox or into
+  an existing regular file with a single link. Before, they were appended through whatever was at the
+  inbox path, including a symbolic link or a FIFO. In every other case the lines stay in the moved-aside
+  inbox, and the answer warns and names that file.
+
+#### Fixed
+
+- A carry-over that cannot be written no longer fails `sync` or `prepare`, and no longer makes `prepare`
+  roll back the run lock after the ledger was written: the answer stays successful and warns.
+- A carry-over write that fails partway is undone. When another writer appended to the inbox in the
+  meantime, or the truncation itself fails, the inbox is left as it is and the warning says it may hold
+  part of the lines; when another writer's lines may have been joined to them, it also names the inbox
+  to check.
+- When a failed `prepare` cannot restore the previous lock, the answer keeps the original error, adds the
+  restore error, and says when the lock still holds the failed call's text. Before, the restore error
+  could replace the original one.
+- Errors from closing the inbox no longer turn a successful `sync` or `prepare` into a failure.
+
 ### [0.4.0] - 2026-10-06
 
 #### Changed

@@ -5,6 +5,7 @@
 'use strict';
 
 const { spawnSync } = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -32,6 +33,7 @@ const EVIDENCE_MAX = 4000;
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
 const OPEN_NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
 const OPEN_NONBLOCK = fs.constants.O_NONBLOCK || 0;
+const OPEN_CREATE_NEW = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | OPEN_NOFOLLOW;
 const TAIL_MAX = 2000;
 const PERMANENT_BRANCHES = ['main', 'master', 'develop', 'trunk'];
 
@@ -162,15 +164,25 @@ function worktreeOfBranch(root, branch) {
 
 // ---- ledger ------------------------------------------------------------------------------------
 
-// A failed write removes its temporary file before it fails, so none is left behind.
+// Writes `text` to a temporary file next to `file` and renames it over `file`. The temporary file has
+// an unpredictable name and is created exclusively without following a link, so anything already at
+// that name fails the write (EEXIST) and is left alone. A failed write removes a temporary file it
+// created before it fails, so none is left behind.
 function writeAtomic(file, text) {
-  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
+  let foreign = false;
   try {
-    fs.writeFileSync(tmp, text);
+    try {
+      fs.writeFileSync(tmp, text, { flag: OPEN_CREATE_NEW });
+    } catch (e) {
+      // Something that was already there is not this write's file.
+      foreign = errCode(e) === 'EEXIST';
+      throw e;
+    }
     fs.renameSync(tmp, file);
   } catch (e) {
     try {
-      fs.rmSync(tmp, { force: true });
+      if (!foreign) fs.rmSync(tmp, { force: true });
     } catch {
       // The original error is what the caller needs to see.
     }
@@ -688,16 +700,25 @@ function settleLock(ctx, { backup, written, runId, at }) {
 
 // Puts back the exact lock that was there before acquireLock, unless the lock path no longer holds
 // this call's text (another call replaced it, or it is now a link, a FIFO, another user's file or too
-// large to read); the lock path is left as it is then, and the moved-aside lock is removed.
+// large to read); the lock path is left as it is then, and the moved-aside lock is removed. When
+// removing or rewriting the lock fails, the error is marked `lockStillThisCalls`.
 function restoreLock(ctx, { previous, backup, written }) {
   withLockGuard(ctx, () => {
     if (lockState(ctx).text !== written) {
       if (backup !== null) fs.rmSync(backup, { force: true });
       return;
     }
-    if (backup !== null) fs.renameSync(backup, ctx.lockFile);
-    else if (previous === null) fs.rmSync(ctx.lockFile, { force: true });
-    else writeAtomic(ctx.lockFile, previous);
+    if (backup !== null) {
+      fs.renameSync(backup, ctx.lockFile);
+      return;
+    }
+    try {
+      if (previous === null) fs.rmSync(ctx.lockFile, { force: true });
+      else writeAtomic(ctx.lockFile, previous);
+    } catch (e) {
+      if (e && typeof e === 'object') e.lockStillThisCalls = true;
+      throw e;
+    }
   });
 }
 
@@ -738,6 +759,66 @@ function refreshLockGuarded(ctx, runId) {
 }
 
 // ---- inbox -------------------------------------------------------------------------------------
+
+// Writes lines carried over from a moved inbox back to the inbox path, never through a link. A free
+// path is created exclusively; an inbox a writer created in the meantime is appended to only when the
+// open file is a regular file with exactly one link (its owner is not checked: anyone may write the
+// inbox). A write that fails partway truncates the file back to its size before the write (zero for
+// an inbox this call created), but only while its size is still that plus the bytes this call wrote,
+// so lines another writer appended meanwhile are never cut. Returns 'written'; 'skipped' when nothing
+// is left written, in every other case; 'joined' when another writer appended after bytes this call
+// wrote, so its lines may be unreadable; or 'partial' when the file was otherwise not truncated back.
+// Errors from closing are ignored.
+function carryOver(inboxFile, text) {
+  const closeQuietly = fd => {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      // Closing changes nothing about what was written.
+    }
+  };
+  let fd;
+  let size = 0;
+  try {
+    fd = fs.openSync(inboxFile, OPEN_CREATE_NEW | fs.constants.O_APPEND);
+  } catch (e) {
+    if (errCode(e) !== 'EEXIST') return 'skipped';
+    try {
+      fd = fs.openSync(inboxFile, fs.constants.O_WRONLY | fs.constants.O_APPEND | OPEN_NOFOLLOW | OPEN_NONBLOCK);
+    } catch {
+      return 'skipped';
+    }
+    try {
+      const st = fs.fstatSync(fd);
+      if (!st.isFile() || st.nlink !== 1) {
+        closeQuietly(fd);
+        return 'skipped';
+      }
+      size = st.size;
+    } catch {
+      closeQuietly(fd);
+      return 'skipped';
+    }
+  }
+  let wrote = 0;
+  try {
+    const bytes = Buffer.from(text, 'utf8');
+    while (wrote < bytes.length) wrote += fs.writeSync(fd, bytes, wrote, bytes.length - wrote);
+    return 'written';
+  } catch {
+    try {
+      // Another writer appended meanwhile: after bytes of this call, the line written last is
+      // incomplete and the other writer's line is joined to it.
+      if (fs.fstatSync(fd).size !== size + wrote) return wrote > 0 ? 'joined' : 'partial';
+      fs.ftruncateSync(fd, size);
+      return 'skipped';
+    } catch {
+      return 'partial';
+    }
+  } finally {
+    closeQuietly(fd);
+  }
+}
 
 // Reads the inbox and appends its valid entries to ctx.L.tasks. Returns the added ids and a
 // `consume(written)` function that renames the inbox once the caller has saved the ledger as the
@@ -829,8 +910,14 @@ function ingestInbox(ctx) {
     if (now === null) {
       return [`the moved inbox ${kept} is not the file that was read; lines appended to it after the read were not carried over`];
     }
-    if (now.length > text.length && now.startsWith(text)) fs.appendFileSync(ctx.inboxFile, now.slice(text.length));
-    return [];
+    if (!(now.length > text.length && now.startsWith(text))) return [];
+    const carried = carryOver(ctx.inboxFile, now.slice(text.length));
+    if (carried === 'written') return [];
+    const warning = `lines appended to the inbox after it was read were not carried over; they remain in ${kept}`;
+    if (carried === 'joined') {
+      return [`${warning}; the inbox may hold part of these lines, and lines appended after them may be unreadable; check ${ctx.inboxFile}`];
+    }
+    return [carried === 'partial' ? `${warning}; the inbox may hold part of these lines` : warning];
   };
   return { added, consume };
 }
@@ -979,8 +1066,17 @@ function opPrepare(ctx, [runId, takeover, heldRunId]) {
     } catch (restoreError) {
       // Without the guard the lock still holds this call's text, so the moved-aside lock is the only
       // copy of the previous one and stays. When renaming it back failed, it stays as well, and the
-      // rename error follows the original one.
-      if (lock.backup === null) throw restoreError;
+      // rename error follows the original one. Without a moved-aside lock, any restore error follows
+      // the original one, which keeps its `locked` value; when the lock still holds this call's text,
+      // or the guard was not taken to find out, that is said too.
+      if (lock.backup === null) {
+        if (e && typeof e === 'object') {
+          const why = restoreError instanceof Failure ? restoreError.message : systemError(restoreError);
+          const still = restoreError && (restoreError.lockStillThisCalls || restoreError.guardUnavailable);
+          e.message += `; ${why}${still ? "; the lock still holds this call's text" : ''}`;
+        }
+        throw e;
+      }
       if (e && typeof e === 'object') {
         e.message += restoreError.guardUnavailable
           ? `; the previous lock is kept at ${lock.backup}`
