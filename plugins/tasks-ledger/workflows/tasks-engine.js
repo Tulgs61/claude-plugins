@@ -22,7 +22,8 @@ const UNSAFE_PATH = /["$`\\!]|[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 // Whitespace other than a plain space; `args` paths refuse the space as well.
 const OTHER_SPACE = /(?! )\s/;
 const STOPPED_MAX = 300;
-// A lock refresh at an agent boundary is skipped while the last successful `sync` is younger.
+// How long a successful `sync` keeps the run lock fresh. The runtime throws on reading the clock or
+// asking for random numbers, so freshness is tracked with a timer of this length.
 const REFRESH_MS = 10 * 60 * 1000;
 
 // ---- arguments (all checks happen before the first agent call) ---------------------------------
@@ -131,9 +132,18 @@ function lastJsonObject(stdout) {
 }
 
 let opsChain = Promise.resolve();
+let opsQueued = 0; // serialised helper calls running or waiting for their turn
 function serialised(fn) {
+  opsQueued++;
   const run = opsChain.then(fn, fn);
-  opsChain = run.catch(() => {});
+  opsChain = run.then(
+    () => {
+      opsQueued--;
+    },
+    () => {
+      opsQueued--;
+    }
+  );
   return run;
 }
 
@@ -155,8 +165,10 @@ async function runOps(command) {
   return { ok: false, error: `no answer from the helper after ${OPS_ATTEMPTS} attempts` };
 }
 
+const opsLine = (subcommand, rest) => [subcommand, `"${ledgerPath}"`, ...rest].join(' ');
+
 function ops(subcommand, ...rest) {
-  const command = [subcommand, `"${ledgerPath}"`, ...rest].join(' ');
+  const command = opsLine(subcommand, rest);
   return subcommand === 'verify' ? runOps(command) : serialised(() => runOps(command));
 }
 
@@ -485,22 +497,104 @@ function start(t) {
   running.set(t.id, promise);
 }
 
-let lastSync = null; // clock time of this run's last successful `sync`
+// Lock freshness: `refreshDue` is true until a `sync` succeeds, and again once the refresh timer,
+// armed for REFRESH_MS by every successful `sync`, fires. At most one refresh timer is armed, and
+// one is always armed while a refresh is due after a failed `sync` or once a task agent started.
+let refreshDue = true;
+let refreshTimer = null;
+let syncing = null; // the `sync` in progress, if any; it settles without rejecting
+let heartbeat = null; // the heartbeat refresh in progress, if any; it never rejects
+let taskAgents = 0; // implementer and reviewer calls in progress
+let runEnded = false; // set once the main loop is over: no timer is armed and no heartbeat starts
 
-async function syncTasks() {
-  // The run id lets the helper refresh the lock only while it still names this run.
-  const answer = await ops('sync', runId);
-  if (answer.ok) {
-    lastSync = Date.now();
-    for (const t of learn(answer.tasks)) await setAside(t);
-  } else {
-    log(`sync failed: ${answer.error || 'unknown error'}`);
-  }
+function armRefreshTimer() {
+  if (refreshTimer !== null) clearTimeout(refreshTimer);
+  refreshTimer = runEnded ? null : setTimeout(onRefreshTimer, REFRESH_MS);
 }
 
-// Keeps the run lock fresh during long agent calls. A failed refresh is only logged.
+// Arms the timer when a refresh is due and none is armed, so a due refresh is always attempted.
+function keepRefreshTimer() {
+  if (refreshDue && refreshTimer === null) armRefreshTimer();
+}
+
+function stopRefreshTimer() {
+  if (refreshTimer !== null) clearTimeout(refreshTimer);
+  refreshTimer = null;
+}
+
+// Waits until no `sync` is in progress.
+async function syncIdle() {
+  while (syncing !== null) await syncing;
+}
+
+// Returns whether the `sync` succeeded. `label` names a failure in the log. A `sync` is in progress
+// from the moment its helper call is made (at once when the serialised helper path is idle, else when
+// its turn comes) until its answer has been taken in; the helper path never runs two at once.
+async function syncTasks(label = 'sync') {
+  let release;
+  const settled = new Promise(resolve => {
+    release = resolve;
+  });
+  if (opsQueued === 0) syncing = settled;
+  let answer = null;
+  let added = [];
+  try {
+    // The run id lets the helper refresh the lock only while it still names this run.
+    answer = await serialised(() => {
+      syncing = settled;
+      return runOps(opsLine('sync', [runId]));
+    });
+    if (answer.ok) {
+      refreshDue = false;
+      armRefreshTimer();
+      // `learn` sets unstartable tasks aside before the first `await` below.
+      added = learn(answer.tasks);
+    }
+  } finally {
+    if (syncing === settled) syncing = null;
+    release();
+    // A failed `sync` leaves the refresh due; the timer makes sure it is attempted again.
+    if (!answer || !answer.ok) keepRefreshTimer();
+  }
+  if (!answer.ok) {
+    log(`${label} failed: ${answer.error || 'unknown error'}`);
+    return false;
+  }
+  for (const t of added) await setAside(t);
+  return true;
+}
+
+// The refresh timer fired: the lock is due for a refresh. While an implementer or reviewer is in
+// progress, the heartbeat refreshes it straight away; otherwise the next agent boundary does.
+function onRefreshTimer() {
+  refreshTimer = null;
+  refreshDue = true;
+  if (runEnded || taskAgents === 0 || heartbeat !== null) return;
+  heartbeat = beat().finally(() => {
+    heartbeat = null;
+  });
+}
+
+// A `sync` already in progress is awaited first and makes the heartbeat unnecessary when it
+// succeeded. A failed heartbeat is logged and retried after REFRESH_MS while agents keep running; it
+// never ends the run.
+async function beat() {
+  try {
+    // No `await` between the last check and the start of the `sync`, so no other refresh slips in.
+    while (syncing !== null) await syncing;
+    if (!refreshDue || runEnded || taskAgents === 0) return;
+    await syncTasks('lock refresh');
+  } catch (error) {
+    log(`lock refresh failed: ${(error && error.message) || error}`);
+  }
+  keepRefreshTimer();
+}
+
+// Keeps the run lock fresh at an agent boundary, only while a refresh is due. A `sync` already in
+// progress is awaited first, so a boundary never doubles it. A failed refresh is only logged.
 async function refreshLock() {
-  if (lastSync !== null && Date.now() - lastSync < REFRESH_MS) return;
+  while (syncing !== null) await syncing;
+  if (!refreshDue) return;
   try {
     await syncTasks();
   } catch (error) {
@@ -512,9 +606,12 @@ async function refreshLock() {
 // returns (also when it throws).
 async function runAgent(prompt, options) {
   await refreshLock();
+  taskAgents++;
+  keepRefreshTimer();
   try {
     return await agent(prompt, options);
   } finally {
+    taskAgents--;
     await refreshLock();
   }
 }
@@ -552,6 +649,12 @@ try {
   if (stopped === null) stopped = `unexpected error: ${(error && error.message) || error}`;
   await Promise.allSettled(running.values());
 }
+// No timer outlives the run, and no `sync` runs once `prs` or `finish` may start.
+runEnded = true;
+stopRefreshTimer();
+if (heartbeat !== null) await heartbeat;
+await syncIdle();
+stopRefreshTimer();
 
 const idsWith = status => [...tasks.values()].filter(t => t.status === status).map(t => t.id);
 const waiting = idsWith('todo');

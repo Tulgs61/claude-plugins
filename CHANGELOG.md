@@ -54,6 +54,22 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ## tasks-ledger
 
+### [0.3.2] - 2026-10-06
+
+#### Fixed
+
+- The tasks engine no longer reads the clock. The workflow runtime does not allow `Date.now()`, so the
+  first successful `sync` ended every real run with "unexpected error". The run-lock refresh is now
+  driven by a 10-minute timer.
+- A single long implementer or reviewer call no longer lets the run lock go stale: while one runs, the
+  engine refreshes the lock every 10 minutes (a heartbeat), and retries after a failed refresh. At most
+  one refresh is in flight, and no timer outlives the run.
+
+#### Changed
+
+- The README notes the limits of the heartbeat: it waits for a free agent slot when every slot is busy,
+  and timers do not fire while the computer sleeps.
+
 ### [0.3.1] - 2026-10-06
 
 #### Fixed

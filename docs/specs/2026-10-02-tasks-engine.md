@@ -393,3 +393,105 @@ refusal of invalid task ids).
     way (reason `needs acceptance`) and never counts as the run's first failure. Test: a lock-refresh `sync`
     during two running tasks reports five `needsAcceptance` tasks; none of them gets an implementer,
     reviewer, `status verified` or `merge`, and all five are named in `stopped`.
+
+## Amendments (rev 11)
+
+These amendments take precedence over every earlier section and amendment where they differ.
+
+1. **No clock and no randomness in the body.** The Workflow runtime that runs this script makes
+   `Date.now()`, `Date()` and `new Date()` without arguments, and `Math.random()` throw ("unavailable in
+   workflow scripts (breaks resume)"). It provides `setTimeout` and `clearTimeout`. It does not provide
+   `setInterval`. The body calls none of the throwing functions, directly or indirectly. This replaces
+   "measured with the clock" in rev 10, amendment 1.
+   - Why this matters: with the clock call in place, every successful `sync` throws right after the
+     helper answered. Tasks that the `sync` reports are then not learned or set aside, a refresh at an
+     agent boundary is logged as failed and attempted again at every boundary, and the `sync` of the main
+     loop ends the run with `unexpected error: …` after the first task finishes.
+   - The Runtime calls table gains `setTimeout(fn, ms)` and `clearTimeout(id)`, which are globals of the
+     runtime and not parameters of the body. The body signature (`args`, `agent`, `phase`, `log`) does
+     not change.
+2. **The refresh timer.** Lock freshness is tracked with one timer instead of a clock reading. The
+   refresh interval stays 10 minutes (`REFRESH_MS`).
+   - The engine keeps a flag, *due*, which starts as true.
+   - Every successful `sync`, whatever started it, sets *due* to false. It also clears the refresh timer
+     if one is armed, and arms it again for `REFRESH_MS`. At most one refresh timer is armed at any time.
+   - When the timer fires, *due* becomes true. If at least one implementer or reviewer agent call is in
+     progress at that moment, the engine starts a refresh straight away (the *heartbeat*). The heartbeat
+     is the existing `sync <runId>`, made through the serialised helper path like every other `sync`.
+     If no task agent is in progress, nothing else happens until the next boundary.
+   - When a heartbeat `sync` fails, or its helper call returns no answer, the engine logs
+     `lock refresh failed: …` and arms the timer again for `REFRESH_MS`, so the heartbeat retries while
+     agents keep running. *due* stays true.
+   - A refresh at an agent boundary (rev 10, amendment 1: right before an implementer or reviewer
+     starts, and right after it returns or throws) runs only while *due* is true. It is skipped
+     otherwise.
+   - So during a single implementer or reviewer call of any length, the engine attempts a `sync` at
+     least every `REFRESH_MS`, within the limit of amendment 4.
+   - Tasks that a heartbeat `sync` reports join the schedule as for any other `sync` (rev 10,
+     amendments 1 and 14: they are learned, and unstartable ones are set aside synchronously).
+   - Nothing that the timer callback starts can reject without being handled. Any error is logged and
+     never ends the run.
+3. **No timer outlives the run.** Once the main scheduling loop has ended, whether normally or through
+   its `catch`, the engine clears the refresh timer and waits for any heartbeat `sync` that is still in
+   progress. Only then does it call `prs` or `finish`. No `sync` starts after `finish` has been called,
+   and no timer is armed when the body returns. A failed `prepare` arms no timer. Argument errors,
+   which are thrown before the first agent call, arm no timer either.
+4. **Limit (stated, not solved).** A heartbeat is itself an `agent()` call (an ops agent), so it counts
+   towards the runtime's limit on concurrent agents. When every slot is taken by implementer and
+   reviewer agents, the heartbeat waits until one returns. The lock can then still go stale during one
+   very long call. The runtime does not tell the script what the limit is (the documented value is
+   min(16, CPUs − 2)). A timer also does not fire while the host process is suspended, for example
+   while the computer sleeps. Rev 10, amendment 1's "a failed refresh is logged and does not stop the
+   run" still applies. The README's note on long runs states both limits; this amendment allows that README edit.
+5. **Tests**, in the new file `plugins/tasks-ledger/tests/tasks-engine-timer-rev11.test.mjs`. They run the
+   body as the kept tests do (`new AsyncFunction('args', 'agent', 'phase', 'log', body)`), with Node's
+   `mock.timers` from `node:test` enabled for `setTimeout` (and `clearTimeout`). Each test must be able to
+   fail on the commit before the change, unless it is marked as coverage.
+   - **Runtime clock rules.** During the run, `Date.now`, `Math.random` and the argument-less `Date`
+     constructor throw, as in the runtime (the test replaces them and restores them afterwards). Ledger:
+     T1, and T2 depending on T1. The fake helper's first `sync` reports a new task T3 from the inbox.
+     Assert: `stopped` is `null`, T1, T2 and T3 are merged, and no log line contains `unavailable`.
+   - **Source check.** After the first `export ` is removed, the body's source contains no
+     `Date.now`, `Math.random` or `new Date(` and no `Date(` that is not part of another identifier.
+   - **Heartbeat during one long call.** A single task whose implementer does not return until the test
+     has advanced the mocked timers by 35 minutes, in steps of 1 minute, with the microtask queue
+     drained after each step. Assert: at least 3 `sync` calls happen while that implementer call is in
+     progress, each at least `REFRESH_MS` after the previous successful one; the run then completes
+     with `stopped === null`.
+   - **Failed heartbeat retries.** As above, but the fake helper answers the first heartbeat `sync`
+     with `ok: false`. Assert: a log line contains `lock refresh failed`, a further heartbeat `sync`
+     follows 10 mocked minutes later, and the run is not stopped by it.
+   - **Boundaries skip while fresh.** A task whose implementer and reviewer each advance the mocked
+     timers by 4 minutes: no `sync` happens between the end of the implementer and the start of the
+     reviewer. Mark as coverage: this replaces the rev 10 test of the same rule, which used a fake clock.
+   - **No timer after the end.** After the body has returned, `mock.timers` reports no pending timer, or,
+     if that cannot be queried, advancing by 60 minutes causes no further helper call. Assert the same
+     after a run whose main loop ends through its `catch`. The test picks a fake helper input that
+     reaches that `catch` and says which one in a comment. A task agent that throws does not count,
+     because it only blocks its task. In both cases `finish` is the last helper call.
+   - **Heartbeat reports unstartable tasks.** A heartbeat `sync` during a long implementer call reports
+     two `needsAcceptance` tasks. Neither gets an implementer, and both are named in `stopped`
+     (the rev 10, amendment 14 rule, now reached through the timer).
+   - **Kept tests.** These kept test files may be changed, and only in this respect: the fake clock
+     (`Date.now = () => now` and `now += agentMinutes * MINUTE`) is replaced by `mock.timers` that the
+     fake agent advances by `agentMinutes`, and the expected positions of `sync` calls follow
+     amendment 2. A heartbeat `sync` may now appear while an agent is running, and a boundary refresh
+     right after a heartbeat is skipped.
+     - `plugins/tasks-ledger/tests/tasks-engine-rev10.test.mjs`: the `runEngine` helper, and the three
+       "amendment 1: …" tests that assert `sync` positions.
+     - `plugins/tasks-ledger/tests/tasks-engine-never-ready-rev10.test.mjs`: the `runEngine` helper.
+       The assertions of the two amendment 14 tests stay as they are.
+     No other kept test file changes. `tasks-engine.test.mjs` uses a real `setTimeout` only inside its
+     fake agent and keeps passing because no timer outlives the run (amendment 3).
+6. **A due refresh always has a timer, and refreshes are never doubled.** This sharpens amendment 2.
+   - Whenever *due* is true and no refresh timer is armed, the engine arms it for `REFRESH_MS`: after
+     any failed `sync` (boundary, main loop or heartbeat), and when an implementer or reviewer call
+     starts. So a long call gets heartbeat attempts even when the `sync` before it failed.
+   - At most one lock-refresh `sync` is in progress at a time. A boundary refresh or a timer firing
+     while one is in progress waits for it and then checks *due* again, instead of starting another.
+   - **Tests**, added to `plugins/tasks-ledger/tests/tasks-engine-timer-rev11.test.mjs`:
+     - the `sync` before the implementer answers `ok: false`, and the implementer runs 35 mocked minutes:
+       at least 3 `sync` calls happen during that call;
+     - the timer fires while no task agent is running (a fake `verify` advances the timers by 11
+       minutes): a `sync` happens right before the reviewer starts;
+     - two tasks reach a boundary together while due: exactly one `sync` is sent for that boundary.

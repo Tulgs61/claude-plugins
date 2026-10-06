@@ -27,6 +27,18 @@ the `.claude/verify.cmd` opt-in) are in [`rules/conventions.md`](rules/conventio
 - A committed `.claude/verify.cmd` in the target repo (the workflow refuses to start without it), and
   `.claude/runs/` plus `.claude/worktrees/` in its `.gitignore`.
 
+### Long runs
+
+The workflow keeps its run lock fresh with a `sync` at least every 10 minutes while an implementer or
+reviewer is working, and right before and after each of them when one is due. A failed refresh is logged
+and does not stop the run. Two limits remain:
+
+- The refresh is itself an agent call and counts towards Claude Code's limit on concurrent workflow
+  agents (documented as min(16, CPUs − 2)). When implementers and reviewers take every slot, the refresh
+  waits until one of them returns, so the lock can go stale during one very long agent call.
+- The refresh timer does not run while the host process is suspended, for example while the computer
+  sleeps.
+
 ## Skills
 
 | Skill | What it does |
