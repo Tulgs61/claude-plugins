@@ -121,6 +121,16 @@ tests/                       node:test suites
   that repository in a terminal; on POSIX it ignores one not owned by you or writable by group or others.
   Approvals live in the plugin's data directory (`verify-consent.json`). Read the command `approve` shows
   you before typing `yes`.
+- **Consent.** An approval covers one check directory: the directory that contains `.claude/`, relative to
+  the top level of its checkout (linked worktrees share the main checkout's approvals). The approve command
+  the gate prints pins the store it reads (for the `~/.claude` default, `CLAUDE_PLUGIN_DATA=` and
+  `CLAUDE_CONFIG_DIR='<home>/.claude'`), so it records there whatever your terminal exports. It is for a
+  POSIX shell such as bash or zsh; a path with a backslash that shells quote differently inside single
+  quotes (before another backslash or a single quote, or at the end), or with a control character, gets no
+  command. Native Windows still cannot record an approval. The store's location (`CLAUDE_PLUGIN_DATA`,
+  else `CLAUDE_CONFIG_DIR`, else your home directory) must be an absolute path; otherwise no approval
+  applies, no command is offered, and `approve`, `revoke` and `list` change nothing and exit 2. See
+  [verify consent](../../README.md#the-claudeverifycmd-opt-in).
 - **Nothing is pushed by default.** [`scripts/tasks-git.js`](scripts/tasks-git.js) pushes only when the
   ledger has `prs: true` (set only when you asked for PRs), and then only `task/<topic>/*` branches —
   never `task/<topic>/integration`, never a permanent branch. It opens draft PRs and never merges them.

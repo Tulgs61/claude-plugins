@@ -32,12 +32,23 @@ export function storeEntries(env) {
   return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')).entries : [];
 }
 
+// The path of `dir` relative to the nearest ancestor holding .git (real paths, `/` separators), or ''
+// for that ancestor itself and outside a repository.
+export function checkDir(dir) {
+  const own = realpathSync(dir);
+  for (let top = own; ; top = path.dirname(top)) {
+    if (existsSync(path.join(top, '.git'))) return path.relative(top, own).split(path.sep).join('/');
+    if (path.dirname(top) === top) return '';
+  }
+}
+
 // Approves `content` (default: the current <dir>/.claude/verify.cmd) for the repository of `dir`, the
-// directory that contains .claude/.
+// directory that contains .claude/. A check below the top level is approved for its directory (`dir`).
 export function approveCheck(env, dir, content = readFileSync(path.join(dir, '.claude', 'verify.cmd'), 'utf8')) {
   const file = storePath(env);
   const entries = storeEntries(env);
-  entries.push({ repo: repoIdentity(dir), sha256: commandHash(content) });
+  const where = checkDir(dir);
+  entries.push(where ? { repo: repoIdentity(dir), sha256: commandHash(content), dir: where } : { repo: repoIdentity(dir), sha256: commandHash(content) });
   mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   writeFileSync(file, JSON.stringify({ entries }));
 }

@@ -54,6 +54,37 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ## tasks-ledger
 
+### [0.4.0] - 2026-10-06
+
+#### Changed
+
+- An approval of `.claude/verify.cmd` now covers one check directory: the directory that contains
+  `.claude/`, relative to the top level of its checkout. An identical `verify.cmd` in another directory of
+  the same repository needs its own approval. Linked worktrees still share the main checkout's approvals.
+  Existing approvals count as top-level approvals: a check below the top level that was approved before
+  0.4.0 asks again and needs a new approval. `list` prints a third column for approvals below the top
+  level; `revoke` still removes every approval for the repository.
+- The approve command the gate prints also pins the `~/.claude` default store
+  (`CLAUDE_PLUGIN_DATA=` and `CLAUDE_CONFIG_DIR='<home>/.claude'`, with the home directory the hook
+  resolved), so it records into the store the gate reads even when the terminal's `HOME` differs.
+- The approval request says the command is for a POSIX shell such as bash or zsh. A path with a backslash
+  that shells read differently inside single quotes (before another backslash or a single quote, or at
+  the end of the path) gets no command; the request names the path instead.
+- `approve` refuses a check directory that cannot be stored (absolute, with a `..` segment, or with a
+  control or invisible character) and exits 2.
+- Going back to a version before 0.4.0 widens per-directory approvals: an earlier version reads an
+  approval for a subdirectory as an approval of the same command in any directory of the repository, and
+  rewrites it as a top-level approval the next time it rewrites the store. Revoke such approvals before
+  downgrading.
+
+#### Security
+
+- The consent store is never resolved against the working directory. When the value that selects it
+  (`CLAUDE_PLUGIN_DATA`, else `CLAUDE_CONFIG_DIR`, else the home directory) is not an absolute path, no
+  approval applies, the request offers no command, and `approve`, `revoke` and `list` change nothing and
+  exit 2. Before, a relative value let a file inside the repository act as the store and approve the
+  repository's own `verify.cmd`.
+
 ### [0.3.2] - 2026-10-06
 
 #### Fixed

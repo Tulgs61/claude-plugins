@@ -6,11 +6,15 @@
 //                  hash) on stdout and on the controlling terminal (/dev/tty, never stdin), then asks there;
 //                  only the answer `yes` records it. Without a terminal: nothing on stdout, exit 2,
 //                  `needs a terminal` on stderr.
-//   revoke <dir>   removes every entry for the repository of <dir>.
+//   revoke <dir>   removes every entry for the repository of <dir>, whatever its check directory.
 // approve and revoke never replace an existing store they cannot use; they exit 2 and say why.
-//   list           prints one line per entry: repository identity, then the first 12 hex digits of the hash.
+//   list           prints one line per entry: repository identity, the first 12 hex digits of the hash and,
+//                  for a check below the top level, the check directory.
 // The store is $CLAUDE_PLUGIN_DATA/verify-consent.json, or <config>/tasks-ledger/verify-consent.json where
-// <config> is $CLAUDE_CONFIG_DIR or ~/.claude. An entry is (repository identity, sha256 of the command).
+// <config> is $CLAUDE_CONFIG_DIR or ~/.claude. When the value that selects it is not an absolute path, the
+// store is unavailable: approve, revoke and list change nothing and exit 2. An entry is (repository identity, check directory, sha256 of
+// the command); the check directory is the directory containing .claude/, relative to the checkout's top
+// level, and is stored as `dir` only when it is not the top level itself.
 // verify-gate loads this file as a module for the store rules. The answer can only be supplied through
 // the `terminal` (or `ask`) option of approve(), reachable solely by code that loads this file as a module.
 // git is never started by bare name or from the repository (see findProgram).
@@ -39,27 +43,65 @@ function currentUid() {
 
 // Environment variables only choose where the store is. Returns the store file and the environment
 // assignment that chose it: { file, name, value } with name CLAUDE_PLUGIN_DATA or CLAUDE_CONFIG_DIR and
-// its resolved value, or name null for the ~/.claude default.
+// its value, or name null for the ~/.claude default, whose value is <home>/.claude (the CLAUDE_CONFIG_DIR
+// that selects the same file) and whose `home` is the home directory this process resolved. The value that
+// selects the store must be an absolute path; it is never resolved against the working directory, so a file
+// inside a repository can never act as the store. Otherwise the store is unavailable: `file` is null and
+// `unavailable` says why, naming the variable or the home directory.
 function storeSelection(env = process.env) {
+  let sel;
   if (env.CLAUDE_PLUGIN_DATA) {
-    const value = path.resolve(env.CLAUDE_PLUGIN_DATA);
-    return { file: path.join(value, STORE_NAME), name: 'CLAUDE_PLUGIN_DATA', value };
+    const value = env.CLAUDE_PLUGIN_DATA;
+    sel = { file: path.join(value, STORE_NAME), name: 'CLAUDE_PLUGIN_DATA', value, origin: 'CLAUDE_PLUGIN_DATA', given: value };
+  } else if (env.CLAUDE_CONFIG_DIR) {
+    const value = env.CLAUDE_CONFIG_DIR;
+    sel = { file: path.join(value, 'tasks-ledger', STORE_NAME), name: 'CLAUDE_CONFIG_DIR', value, origin: 'CLAUDE_CONFIG_DIR', given: value };
+  } else {
+    const home = os.homedir();
+    const value = path.join(home, '.claude');
+    sel = { file: path.join(value, 'tasks-ledger', STORE_NAME), name: null, value, home, origin: 'the home directory', given: home };
   }
-  if (env.CLAUDE_CONFIG_DIR) {
-    const value = path.resolve(env.CLAUDE_CONFIG_DIR);
-    return { file: path.join(value, 'tasks-ledger', STORE_NAME), name: 'CLAUDE_CONFIG_DIR', value };
+  if (!path.isAbsolute(sel.given)) {
+    const unavailable = `the consent store's location is not an absolute path (${sel.origin} is ${shownPath(sel.given)}), ` +
+      'so the consent store is unavailable';
+    return { ...sel, file: null, unavailable };
   }
-  return { file: path.join(os.homedir(), '.claude', 'tasks-ledger', STORE_NAME), name: null, value: null };
+  // Both are absolute here, so resolving only normalises them.
+  return { ...sel, file: path.resolve(sel.file), value: path.resolve(sel.value) };
 }
 
+// The store file, or null when its location is not an absolute path.
 function storeFile(env = process.env) {
   return storeSelection(env).file;
 }
 
+// Control characters: line breaks and other Cc characters, invisible format characters (Cf, among them
+// bidirectional controls) and the line and paragraph separators. A path or check directory holding one is
+// refused, by this script and by the gate alike.
+const CONTROL_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+
+// Why a check directory below the top level cannot be stored, or null: it must be relative, without a
+// `..` segment or a control character (CONTROL_CHARS).
+function dirProblem(dir) {
+  if (dir.startsWith('/') || path.isAbsolute(dir) || path.win32.isAbsolute(dir)) return 'it is an absolute path';
+  if (dir.split(/[\\/]/).includes('..')) return 'it contains a .. segment';
+  if (CONTROL_CHARS.test(dir)) return 'it contains a control character';
+  return null;
+}
+
+// A check directory as stored: non-empty and without a problem.
+function validDir(dir) {
+  return typeof dir === 'string' && dir !== '' && dirProblem(dir) === null;
+}
+
 function validEntry(e) {
   return e && typeof e === 'object' && typeof e.repo === 'string' && e.repo !== '' &&
-    typeof e.sha256 === 'string' && /^[0-9a-f]{64}$/.test(e.sha256);
+    typeof e.sha256 === 'string' && /^[0-9a-f]{64}$/.test(e.sha256) &&
+    (!Object.prototype.hasOwnProperty.call(e, 'dir') || validDir(e.dir));
 }
+
+// The check directory of an entry; an entry without `dir` is for the top level.
+const entryDir = e => (e.dir === undefined ? '' : e.dir);
 
 // The store's entries as { entries }, or { problem } saying why an existing store cannot be used. It is
 // used only when it is a regular file owned by the current user (POSIX); a missing store has no entries.
@@ -111,7 +153,7 @@ function readStore(file) {
 // following links, renamed over the store. Missing directories are created with mode 0700.
 function writeStore(file, entries) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const data = { entries: entries.map(e => ({ repo: e.repo, sha256: e.sha256 })) };
+  const data = { entries: entries.map(e => (entryDir(e) ? { repo: e.repo, sha256: e.sha256, dir: e.dir } : { repo: e.repo, sha256: e.sha256 })) };
   const tmp = `${file}.${crypto.randomBytes(8).toString('hex')}.tmp`;
   const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW, 0o600);
   let done = false;
@@ -313,10 +355,25 @@ function commandHash(command) {
   return crypto.createHash('sha256').update(Buffer.from(command, 'utf8')).digest('hex');
 }
 
+// The check directory of `dir` (the directory that contains .claude/): its real path relative to the top
+// level of its checkout (the nearest ancestor with a .git entry), with `/` separators; '' for the top level
+// itself and outside a repository. Linked worktrees share the identity, so `pkg` in one covers `pkg` in all.
+function checkDir(dir) {
+  const own = realPath(dir);
+  const top = findGitRoot(own);
+  return top === null ? '' : path.relative(top, own).split(path.sep).join('/');
+}
+
+const sameApproval = (e, repo, dir, sha256) => e.repo === repo && entryDir(e) === dir && e.sha256 === sha256;
+
 function isApproved(dir, command, env = process.env) {
   const repo = repoIdentity(dir);
+  const where = checkDir(dir);
   const sha256 = commandHash(command);
-  return readStore(storeFile(env)).some(e => e.repo === repo && e.sha256 === sha256);
+  const store = storeFile(env);
+  // An unavailable store holds no approvals.
+  if (store === null) return false;
+  return readStore(store).some(e => sameApproval(e, repo, where, sha256));
 }
 
 // The same trust rules as verify-gate: a regular file, on POSIX owned by the current user and not
@@ -403,7 +460,7 @@ function escapeMatches(text, pattern) {
 // space is escaped (escape sequences, carriage returns, backspaces, bidirectional controls, ...).
 const visible = line => escapeMatches(line, /[^\x20-\x7e]/gu);
 // A path shown with its control, format and line-separator characters escaped.
-const shownPath = p => escapeMatches(p, /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu);
+const shownPath = p => escapeMatches(p, new RegExp(CONTROL_CHARS.source, 'gu'));
 
 // The store's entries, or null after naming the store and why it was not used: an existing store that
 // cannot be used is never replaced, so approvals are never discarded silently.
@@ -417,6 +474,14 @@ function usableEntries(store, err) {
 
 const NEEDS_TERMINAL = 'verify-consent: approve needs a terminal; run it yourself in a terminal.\n';
 
+// The store file, or null after saying that its location is not an absolute path.
+function availableStore(env, err) {
+  const sel = storeSelection(env);
+  if (sel.file !== null) return sel.file;
+  err.write(`verify-consent: ${sel.unavailable}; nothing was recorded or changed. Set it to an absolute path and try again.\n`);
+  return null;
+}
+
 // The answer comes only from the terminal that `terminal()` opens (by default the controlling terminal).
 // The `ask` option is the older form of the same seam: a terminal that only asks, where null means none.
 // The terminal is opened first: without one, approve writes nothing but `needs a terminal` on stderr.
@@ -429,11 +494,20 @@ function approve(dir, { ask, terminal, env = process.env, out = process.stdout, 
   }
   let answer;
   let sha256;
+  let store;
   const base = path.resolve(dir);
-  const store = storeFile(env);
+  const where = checkDir(base);
   try {
     const file = path.join(base, VERIFY_REL);
-    if (usableEntries(store, err) === null) return 2;
+    store = availableStore(env, err);
+    if (store === null || usableEntries(store, err) === null) return 2;
+    // A check directory that could not be stored as `dir` is not approved at all.
+    const problem = where ? dirProblem(where) : null;
+    if (problem !== null) {
+      err.write(`verify-consent: the check directory ${shownPath(where)} cannot be approved because ${problem}; ` +
+        'nothing was recorded.\n');
+      return 2;
+    }
     const command = readCheck(base);
     if (command === null) {
       err.write(`verify-consent: ${shownPath(file)} is missing, or not a regular file that only you can modify.\n`);
@@ -463,13 +537,16 @@ function approve(dir, { ask, terminal, env = process.env, out = process.stdout, 
   const repo = repoIdentity(base);
   const entries = usableEntries(store, err);
   if (entries === null) return 2;
-  if (!entries.some(e => e.repo === repo && e.sha256 === sha256)) writeStore(store, [...entries, { repo, sha256 }]);
-  out.write(`Approved for ${shownPath(repo)}.\n`);
+  if (!entries.some(e => sameApproval(e, repo, where, sha256))) {
+    writeStore(store, [...entries, where ? { repo, sha256, dir: where } : { repo, sha256 }]);
+  }
+  out.write(`Approved for ${shownPath(repo)}${where ? ` in ${shownPath(where)}` : ''}.\n`);
   return 0;
 }
 
 function revoke(dir, { env = process.env, out = process.stdout, err = process.stderr } = {}) {
-  const store = storeFile(env);
+  const store = availableStore(env, err);
+  if (store === null) return 2;
   const repo = repoIdentity(path.resolve(dir));
   const entries = usableEntries(store, err);
   if (entries === null) return 2;
@@ -479,8 +556,12 @@ function revoke(dir, { env = process.env, out = process.stdout, err = process.st
   return 0;
 }
 
-function list({ env = process.env, out = process.stdout } = {}) {
-  for (const e of readStore(storeFile(env))) out.write(`${shownPath(e.repo)}\t${e.sha256.slice(0, 12)}\n`);
+function list({ env = process.env, out = process.stdout, err = process.stderr } = {}) {
+  const store = availableStore(env, err);
+  if (store === null) return 2;
+  for (const e of readStore(store)) {
+    out.write(`${shownPath(e.repo)}\t${e.sha256.slice(0, 12)}${entryDir(e) ? `\t${shownPath(e.dir)}` : ''}\n`);
+  }
   return 0;
 }
 
@@ -495,8 +576,8 @@ function main(args) {
 }
 
 module.exports = {
-  storeSelection, storeFile, readStore, shownPath, findProgram, untrustedDirs, repoIdentity, commandHash, isApproved, approve,
-  revoke, list,
+  CONTROL_CHARS, storeSelection, storeFile, readStore, shownPath, findProgram, untrustedDirs, repoIdentity, checkDir, commandHash, isApproved,
+  approve, revoke, list,
 };
 
 if (require.main === module) {

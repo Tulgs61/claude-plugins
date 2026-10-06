@@ -122,27 +122,39 @@ Without the file the gate does nothing. The workflow verifies and merges with th
 on each task's base, never with a copy a task branch changed. It refuses a task whose branch changes it
 in any letter case, so change `verify.cmd` outside a run.
 
-**Approve it once per repository.** The gate runs a repository's `verify.cmd` only after that exact
-command was approved for that repository. A cloned repository is owned by you, so ownership checks
-cannot tell a hostile command apart, and hooks run outside Claude Code's permission prompts. The first
-time the gate meets an unapproved command it skips it and prints the approve command once, for example:
+**Approve it once per repository and check directory.** The gate runs a repository's `verify.cmd` only
+after that exact command was approved for that repository and the directory that holds it. A cloned
+repository is owned by you, so ownership checks cannot tell a hostile command apart, and hooks run outside
+Claude Code's permission prompts. The first time the gate meets an unapproved command it skips it and
+prints the approve command once, for example:
 
 ```bash
 CLAUDE_PLUGIN_DATA='<plugin data dir>' node '<plugin root>/scripts/verify-consent.js' approve '<repo>'
 ```
 
-Paste the command exactly as the gate printed it into bash or zsh in a terminal: its environment prefix
-selects the approval store the gate reads. It shows the command with any control or invisible characters
-escaped, plus its line count and hash, and records it only when you type `yes` at the terminal. A changed
-`verify.cmd` needs a new approval, and linked worktrees share the main checkout's approval. Use the same
-environment prefix with `verify-consent.js list` and `verify-consent.js revoke '<repo>'`; without it they
-work on a different store.
+The printed command pins the approval store the gate reads: it sets the store variables explicitly
+(`CLAUDE_PLUGIN_DATA=` and `CLAUDE_CONFIG_DIR='<home>/.claude'` for the `~/.claude` default, with the home
+directory the hook resolved), so it records into that store whatever your terminal exports and whatever
+its `HOME` is. It is for a POSIX shell such as bash or zsh: paste it exactly as printed into one in a
+terminal. When a path in it contains a backslash that shells quote differently inside single quotes (one
+before another backslash or a single quote, or at the end of the path), or a control character, no
+command is printed; the message names the path instead. It shows the command with any control or
+invisible characters escaped, plus its line count and hash, and records it only when you type `yes` at
+the terminal. A changed `verify.cmd` needs a new approval.
+
+An approval covers one check directory: the directory that contains `.claude/`, relative to the top
+level of its checkout. An identical `verify.cmd` in another directory of the same repository needs its own
+approval. Linked worktrees share the main checkout's approvals, so approving `<main>/pkg` also covers
+`<worktree>/pkg`. Use the same environment prefix with `verify-consent.js list` and
+`verify-consent.js revoke '<repo>'`; without it they work on a different store. `revoke` removes every
+approval for the repository, whatever the directory.
 
 The terminal prompt keeps a plain shell call from answering, but it is not the security boundary: a
 program can fake a terminal. The boundary is Claude Code's permission prompt. Deny any tool call that runs
 `verify-consent.js` or writes `verify-consent.json`, unless you asked for it.
 
-On native Windows the approve prompt is not available yet, so the gate never runs `verify.cmd` there.
+On native Windows the approve prompt is not available yet, so an approval cannot be recorded there and the
+gate never runs `verify.cmd`.
 
 **Which file runs.** The hook starts from the working directory of the session that stops and takes the
 nearest `.claude/verify.cmd` between that directory and its git root (the repository or worktree root,
