@@ -15,7 +15,7 @@
       "name": "tasks-ledger",
       "source": "./plugins/tasks-ledger",
       "description": "Run a list of tasks as a delegated, reviewed workflow: a JSON task ledger with dependencies and file ownership, one task-implementer per task in its own git worktree, an independent reviewer per task, dependency-ordered local merges, and optional draft PRs. Includes dispatch-contract and verify-gate hooks.",
-      "version": "0.4.0"
+      "version": "0.4.1"
     },
     {
       "name": "mockup-loop",
