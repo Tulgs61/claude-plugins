@@ -164,7 +164,16 @@ test('amendment 29: a ledger swapped for a FIFO after its check never blocks the
   const preload = writePreload(sb, 'swap-preload.cjs', SWAP_PRELOAD);
   const r = runWith(sb, ['sync', sb.ledgerFile], { preload, env: { SWAP_PATH: sb.ledgerFile, SWAP_WITH: swap }, ms: 15000 });
   assert.equal(existsSync(swap), false, 'the swap happened');
-  if (!r.ok) assert.match(r.error, /not a regular file/);
+  if (!r.ok) {
+    assert.match(r.error, /not a regular file/);
+    return;
+  }
+  // The listing comes from the original ledger, not from the FIFO.
+  const expected = [{
+    acceptance: 'acceptance of T1', base: null, branch: null, budget: '5 turns', constraints: [], dependsOn: [], files: [],
+    id: 'T1', needsAcceptance: false, pr: null, proof: 'true', status: 'todo', title: 'task T1', worktree: null,
+  }];
+  assert.deepEqual(r.tasks, expected);
 });
 
 test('amendment 30: prepare checks the fresh ledger before writing it, so nothing fails after the write', t => {

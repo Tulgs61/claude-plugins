@@ -54,6 +54,24 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ## tasks-ledger
 
+### [0.3.1] - 2026-10-06
+
+#### Fixed
+
+- A bare `takeover` of an unreadable lock no longer leaves the moved-aside copy behind. If writing the
+  new lock fails, the old lock is put back; after success, or when another run replaced the lock in the
+  meantime (including when the lock path became a link or another unsafe file), the copy is removed.
+  Only when the guard cannot be taken to restore the lock, or renaming the copy back fails, is the copy
+  kept, and the error names its path after the original error. A failed atomic write leaves no
+  temporary file.
+- `cannot create guard` errors name the system error code once (`EACCES: permission denied, …`, not
+  `EACCES: EACCES: …`).
+
+#### Changed
+
+- The test for a ledger swapped for a FIFO also checks the success case: the listing comes from the
+  original file.
+
 ### [0.3.0] - 2026-10-06
 
 #### Changed
