@@ -9,6 +9,14 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ## handover
 
+### [0.1.2] - 2026-10-06
+
+#### Changed
+
+- The check that a `/fresh` marker owned by another user is neither honoured nor deleted is now tested on
+  every platform without root, by running the hook with a stubbed `process.getuid`. A control test with
+  the owner's uid shows the same setup resumes, so the foreign-owner result comes from the owner check.
+
 ### [0.1.1] - 2026-10-05
 
 #### Fixed
