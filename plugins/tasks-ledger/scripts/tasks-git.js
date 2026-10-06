@@ -162,10 +162,20 @@ function worktreeOfBranch(root, branch) {
 
 // ---- ledger ------------------------------------------------------------------------------------
 
+// A failed write removes its temporary file before it fails, so none is left behind.
 function writeAtomic(file, text) {
   const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmp, text);
-  fs.renameSync(tmp, file);
+  try {
+    fs.writeFileSync(tmp, text);
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      // The original error is what the caller needs to see.
+    }
+    throw e;
+  }
 }
 
 // Writes ctx.L and returns the text written.
@@ -528,9 +538,26 @@ function releaseGuard(guard, content) {
   });
 }
 
+// The system error code and message, with the code named once: `<code>: <message>`, the message as
+// it is when it already starts with its code, or `error: <message>` when there is no code.
+function systemError(e) {
+  const code = errCode(e);
+  const message = e && e.message !== undefined ? e.message : String(e);
+  if (!code) return `error: ${message}`;
+  return message.startsWith(`${code}:`) ? message : `${code}: ${message}`;
+}
+
+// A failure to take the guard at all (it cannot be created, or waiting for it ran out); it is marked
+// so that callers can tell it apart from a failure inside the guarded step.
+function guardUnavailable(message, extra) {
+  const e = new Failure(message, extra);
+  e.guardUnavailable = true;
+  throw e;
+}
+
 // Hard links are named only when the link step itself failed; otherwise the system error is.
 const cannotCreateGuard = (guard, e, linking) =>
-  fail(`cannot create guard ${guard}: ${errCode(e) || 'error'}: ${e.message}${linking ? '; the file system must support hard links' : ''}`);
+  guardUnavailable(`cannot create guard ${guard}: ${systemError(e)}${linking ? '; the file system must support hard links' : ''}`);
 
 // Runs fn while holding the lock guard `<lock>.guard`, so that at most one caller at a time reads,
 // judges and writes the run lock and the ledger. The guard's content (token, owner pid, host,
@@ -562,7 +589,7 @@ function withLockGuard(ctx, fn) {
       }
       breakAbandonedGuard(guard, token);
       if (Date.now() > deadline) {
-        fail(`another run (unknown, holding the lock guard ${guard}) is using the run lock of this ledger; try again`, { locked: true });
+        guardUnavailable(`another run (unknown, holding the lock guard ${guard}) is using the run lock of this ledger; try again`, { locked: true });
       }
       sleepMs(5 + Math.floor(Math.random() * 20));
     }
@@ -623,24 +650,51 @@ function acquireLock(ctx, runId, takeover, heldRunId) {
     }
     const at = Date.now();
     const written = JSON.stringify({ runId, at, pid: process.pid, preparing: true }) + '\n';
-    writeAtomic(ctx.lockFile, written);
+    try {
+      writeAtomic(ctx.lockFile, written);
+    } catch (e) {
+      // Still under the guard: the moved lock goes back, but never over something at the lock path.
+      if (backup === null) throw e;
+      if (lstatOrNull(ctx.lockFile) !== null) {
+        fail(`cannot write the lock ${ctx.lockFile}: ${systemError(e)}; something is at the lock path, so the previous lock is kept at ${backup}`);
+      }
+      try {
+        fs.renameSync(backup, ctx.lockFile);
+      } catch (renameError) {
+        if (e && typeof e === 'object') e.message = `${e.message}${cannotPutBack(renameError, backup)}`;
+      }
+      throw e;
+    }
     return { previous, backup, written, runId, at, tookOver };
   });
 }
 
+// What follows the original error when the moved-aside lock could not be renamed back: the rename
+// error and where the previous lock is kept.
+const cannotPutBack = (renameError, backup) =>
+  `; cannot put back the previous lock: ${systemError(renameError)}; the previous lock is kept at ${backup}`;
+
 // Drops the `preparing` mark once prepare has succeeded, unless another call has replaced the lock.
+// The moved-aside lock is removed even when the guard cannot be taken: it is private to this call.
 function settleLock(ctx, { backup, written, runId, at }) {
-  withLockGuard(ctx, () => {
+  try {
+    withLockGuard(ctx, () => {
+      if (readLockText(ctx) === written) writeAtomic(ctx.lockFile, JSON.stringify({ runId, at }) + '\n');
+    });
+  } finally {
     if (backup !== null) fs.rmSync(backup, { force: true });
-    if (readLockText(ctx) === written) writeAtomic(ctx.lockFile, JSON.stringify({ runId, at }) + '\n');
-  });
+  }
 }
 
-// Puts back the exact lock that was there before acquireLock, unless another call has replaced ours
-// since.
+// Puts back the exact lock that was there before acquireLock, unless the lock path no longer holds
+// this call's text (another call replaced it, or it is now a link, a FIFO, another user's file or too
+// large to read); the lock path is left as it is then, and the moved-aside lock is removed.
 function restoreLock(ctx, { previous, backup, written }) {
   withLockGuard(ctx, () => {
-    if (readLockText(ctx) !== written) return;
+    if (lockState(ctx).text !== written) {
+      if (backup !== null) fs.rmSync(backup, { force: true });
+      return;
+    }
     if (backup !== null) fs.renameSync(backup, ctx.lockFile);
     else if (previous === null) fs.rmSync(ctx.lockFile, { force: true });
     else writeAtomic(ctx.lockFile, previous);
@@ -920,7 +974,19 @@ function opPrepare(ctx, [runId, takeover, heldRunId]) {
 
     return { added, agents, integration, prs: ctx.L.prs === true, root, start, tasks: listing(ctx.L), warnings };
   } catch (e) {
-    restoreLock(ctx, lock);
+    try {
+      restoreLock(ctx, lock);
+    } catch (restoreError) {
+      // Without the guard the lock still holds this call's text, so the moved-aside lock is the only
+      // copy of the previous one and stays. When renaming it back failed, it stays as well, and the
+      // rename error follows the original one.
+      if (lock.backup === null) throw restoreError;
+      if (e && typeof e === 'object') {
+        e.message += restoreError.guardUnavailable
+          ? `; the previous lock is kept at ${lock.backup}`
+          : cannotPutBack(restoreError, lock.backup);
+      }
+    }
     throw e;
   }
 }
