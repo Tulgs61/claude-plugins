@@ -402,8 +402,6 @@ function shellQuote(text) {
   return `'${text.replace(/'/g, "'\\''")}'`;
 }
 
-// Line breaks and other control characters, and invisible format characters.
-const CONTROL_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 // A backslash that some shells (fish) read as an escape inside single quotes once the path is quoted: one
 // before another backslash or a single quote, or at the end, where it meets the closing quote.
 const QUOTED_BACKSLASH = /\\(?=[\\']|$)/;
@@ -435,7 +433,8 @@ function approvalRequest(dir) {
     const named = bad.map(([what, shown]) => `${what} (${consent.shownPath(shown)})`);
     return named.length === 1 ? named[0] : `${named.slice(0, -1).join(', ')} and ${named[named.length - 1]}`;
   };
-  const control = paths.filter(([, , p]) => CONTROL_CHARS.test(p));
+  // Control characters as the consent script defines them, so both refuse the same paths.
+  const control = paths.filter(([, , p]) => consent.CONTROL_CHARS.test(p));
   if (control.length > 0) {
     return `${text}The path of ${naming(control)} contains control characters, so no approve command is offered; ` +
       'move or rename it, then approve the check with scripts/verify-consent.js in a terminal.';

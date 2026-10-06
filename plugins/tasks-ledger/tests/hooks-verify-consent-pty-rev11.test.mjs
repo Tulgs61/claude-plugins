@@ -94,3 +94,13 @@ test('approve on a terminal: without a check file the question never appears, so
   assert.equal(r.output.includes(QUESTION), false, r.output);
   assert.equal(existsSync(storePath(env)), false);
 });
+
+// Coverage: the probe waits for its child before it closes the terminal, so the child is never hung up and
+// the probe never reports a working pty module as missing.
+test('the pty probe succeeds 20 times in a row', { skip }, () => {
+  assert.ok(PTY_OK, 'python3 with a working pty module is required when CI is set');
+  for (let i = 0; i < 20; i++) {
+    const r = spawnSync('python3', ['-I', DRIVER, '--probe'], { encoding: 'utf8', timeout: 30000 });
+    assert.equal(r.status, 0, `probe ${i}: ${r.stderr}`);
+  }
+});

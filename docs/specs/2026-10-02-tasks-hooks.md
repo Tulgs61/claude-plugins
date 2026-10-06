@@ -605,3 +605,19 @@ concern verify-gate and `scripts/verify-consent.js`. dispatch-guard is unchanged
    - In `plugins/tasks-ledger/tests/hooks-verify-consent-pty-rev11.test.mjs`: `approve` in a directory with
      no `.claude/verify.cmd`, driven with `hangup`. Assert: the driver reports `asked: false` and
      `timedOut: true`, and nothing is recorded. The skip and `CI` rules of amendment 5 apply.
+10. **Fix round 3.**
+   - **The pty probe waits for its child.** `pty-drive.py --probe` checks only that a pseudo-terminal can
+     be created. It waits for the child to end before it closes the terminal, so closing it can never
+     hang the child up. The probe succeeds when the child exited with status 0. Today it closes the
+     terminal first, so the child is sometimes killed by the hangup and the probe reports no working
+     `pty`; under `CI` the pty tests then fail.
+   - **One meaning of "control character".** Wherever these amendments reject or refuse a path or a
+     check directory for a control character (amendments 1, 4 and 7, and the gate's rule of rev 10,
+     amendments 19 and 28), a control character is any character in the Unicode categories Cc, Cf, Zl or
+     Zp, the class the gate already uses. So a stored `dir` with, for example, U+202E or U+2028 is
+     invalid, and `approve` refuses such a check directory with exit 2.
+   - **Tests.** In `plugins/tasks-ledger/tests/hooks-verify-consent-dir-rev11.test.mjs`: store entries
+     with `dir` holding U+202E or U+2028 are ignored. In `plugins/tasks-ledger/tests/hooks-verify-consent-default-rev11.test.mjs`
+     or the dir test file: `approve` in a check directory whose relative path holds U+202E exits 2 and
+     records nothing (POSIX only). A probe test, marked as coverage and following the skip and `CI` rules
+     of amendment 5, runs `pty-drive.py --probe` 20 times and expects exit 0 every time.

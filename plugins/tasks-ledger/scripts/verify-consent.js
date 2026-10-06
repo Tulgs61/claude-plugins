@@ -75,12 +75,17 @@ function storeFile(env = process.env) {
   return storeSelection(env).file;
 }
 
+// Control characters: line breaks and other Cc characters, invisible format characters (Cf, among them
+// bidirectional controls) and the line and paragraph separators. A path or check directory holding one is
+// refused, by this script and by the gate alike.
+const CONTROL_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+
 // Why a check directory below the top level cannot be stored, or null: it must be relative, without a
-// `..` segment or a control character.
+// `..` segment or a control character (CONTROL_CHARS).
 function dirProblem(dir) {
   if (dir.startsWith('/') || path.isAbsolute(dir) || path.win32.isAbsolute(dir)) return 'it is an absolute path';
   if (dir.split(/[\\/]/).includes('..')) return 'it contains a .. segment';
-  if (/[\p{Cc}]/u.test(dir)) return 'it contains a control character';
+  if (CONTROL_CHARS.test(dir)) return 'it contains a control character';
   return null;
 }
 
@@ -455,7 +460,7 @@ function escapeMatches(text, pattern) {
 // space is escaped (escape sequences, carriage returns, backspaces, bidirectional controls, ...).
 const visible = line => escapeMatches(line, /[^\x20-\x7e]/gu);
 // A path shown with its control, format and line-separator characters escaped.
-const shownPath = p => escapeMatches(p, /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu);
+const shownPath = p => escapeMatches(p, new RegExp(CONTROL_CHARS.source, 'gu'));
 
 // The store's entries, or null after naming the store and why it was not used: an existing store that
 // cannot be used is never replaced, so approvals are never discarded silently.
@@ -571,7 +576,7 @@ function main(args) {
 }
 
 module.exports = {
-  storeSelection, storeFile, readStore, shownPath, findProgram, untrustedDirs, repoIdentity, checkDir, commandHash, isApproved,
+  CONTROL_CHARS, storeSelection, storeFile, readStore, shownPath, findProgram, untrustedDirs, repoIdentity, checkDir, commandHash, isApproved,
   approve, revoke, list,
 };
 

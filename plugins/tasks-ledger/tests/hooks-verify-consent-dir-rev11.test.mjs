@@ -215,3 +215,33 @@ test('approve in a check directory whose relative path holds a control character
   assert.equal(b.code, 0, b.stderr);
   assert.deepEqual(storeEntries(env).map(e => e.dir), ['plain']);
 });
+
+test('entries whose dir holds a format character (U+202E) or a line separator (U+2028) are ignored', { skip: !POSIX }, () => {
+  const repo = makeGitRepo('dir-format');
+  const body = 'echo dir-format-ran >&2; exit 1\n';
+  for (const [i, dir] of ['a‮b', 'a b'].entries()) {
+    // The check sits in exactly that directory, so only the rule on `dir` keeps the entry from approving it.
+    const checkDir = join(repo, dir);
+    writeVerify(checkDir, body);
+    const env = freshEnv();
+    writeStoreEntries(env, [{ repo: repoIdentity(repo), sha256: commandHash(body), dir }]);
+    const session = `rev11-dir-format-${i}`;
+    assert.equal(edit(env, session, checkDir).status, 0);
+    assertRequest(stop(env, session, checkDir), /dir-format-ran/);
+    assert.equal(consentCli(env, 'list').stdout, '', JSON.stringify(dir));
+  }
+});
+
+test('approve in a check directory whose relative path holds U+202E records nothing and exits 2', {
+  skip: !POSIX,
+}, async () => {
+  const env = freshEnv();
+  const repo = makeGitRepo('dir-bidi');
+  const sub = join(repo, 'a‮b');
+  writeVerify(sub, 'echo dir-bidi\n');
+  const a = await approveInChild(env, sub, 'yes');
+  assert.equal(a.code, 2, a.stderr);
+  assert.match(a.stderr, /cannot be approved/);
+  assert.match(a.stderr, /control character/);
+  assert.equal(existsSync(storePath(env)), false);
+});

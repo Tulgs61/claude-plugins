@@ -8,7 +8,9 @@ most WAIT_SECONDS, and prints one JSON line: {"output", "asked", "exit", "signal
 `output` is everything the program wrote to the terminal (decoded as UTF-8, invalid bytes replaced).
 When <question> never appears, neither action is taken: the driver kills the program and reports
 `asked: false` and `timedOut: true`.
-`usage: python3 pty-drive.py --probe` only checks that a pseudo-terminal can be created.
+`usage: python3 pty-drive.py --probe` only checks that a pseudo-terminal can be created: it waits for the
+child to end before it closes the terminal, so the child is never hung up, and succeeds when the child
+exited with status 0.
 """
 import json
 import os
@@ -47,8 +49,11 @@ def main(argv):
         pid, fd = pty.fork()
         if pid == 0:
             os._exit(0)
-        os.close(fd)
         status = wait_for(pid, WAIT_SECONDS)
+        if status is None:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        os.close(fd)
         return 0 if status is not None and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 else 1
 
     action, question, program = argv[0], argv[1].encode('utf-8'), argv[2:]
