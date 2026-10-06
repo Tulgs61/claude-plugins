@@ -1,7 +1,7 @@
 // Rev 10 of the tasks-engine spec, amendment 14: unstartable tasks are never ready. They are set
 // aside in the engine's own state as soon as an answer reports them, so no scheduling step can start
 // one, and a title-only task without proof or budget is set aside the same way.
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ENGINE, task } from './helpers/git-sandbox.mjs';
@@ -12,16 +12,15 @@ const body = readFileSync(ENGINE, 'utf8').replace(/^export\s+/m, '');
 const GOOD_REVIEW = { verdict: 'verified', acceptance_met: true, scope_ok: true, constraints_ok: true, findings: [], evidence: 'ok' };
 const MINUTE = 60 * 1000;
 
-// Runs the engine against a fake helper and a fake clock that moves `agentMinutes` during every task
-// agent call. `answers` overrides the canned answer per subcommand (a function of the parts after the
-// ledger path and of the call count of that subcommand). `events` records ops lines and task agent
+// Runs the engine against a fake helper, with mocked timers that every task agent call advances by
+// `agentMinutes` (`setImmediate` is not mocked). `answers` overrides the canned answer per subcommand
+// (a function of the parts after the ledger path and of the call count of that subcommand). `events` records ops lines and task agent
 // calls (`impl T1`, `review T1`) in order.
 async function runEngine(ledgerTasks, { answers = {}, agentMinutes = 0 } = {}) {
   const run = new AsyncFunction('args', 'agent', 'phase', 'log', body);
   const events = [];
   const opsLines = [];
   const counts = {};
-  let now = Date.UTC(2026, 9, 5);
   const canned = {
     prepare: () => ({ ok: true, start: 'abc123', integration: '/tmp/int', prs: false, tasks: ledgerTasks }),
     worktree: id => ({ ok: true, worktree: `/tmp/wt-${id}`, branch: `task/t/${id}`, base: 'main' }),
@@ -35,7 +34,11 @@ async function runEngine(ledgerTasks, { answers = {}, agentMinutes = 0 } = {}) {
       const isImpl = /^TASK: /.test(prompt);
       const id = isImpl ? prompt.match(/^TASK: (\S+)/)[1] : prompt.match(/^Review task (\S+)/)[1];
       events.push(`${isImpl ? 'impl' : 'review'} ${id}`);
-      now += agentMinutes * MINUTE;
+      // A minute at a time, so agents that run side by side are all in progress while time passes.
+      for (let i = 0; i < agentMinutes; i++) {
+        mock.timers.tick(MINUTE);
+        await new Promise(resolve => setImmediate(resolve));
+      }
       return isImpl ? 'done' : GOOD_REVIEW;
     }
     const line = prompt.match(/node "[^"]*" (.*)\n/)[1];
@@ -46,13 +49,12 @@ async function runEngine(ledgerTasks, { answers = {}, agentMinutes = 0 } = {}) {
     return { stdout: JSON.stringify(canned[op] ? canned[op](...rest, counts[op]) : { ok: true }) };
   };
   const args = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId: 'test1' };
-  const realNow = Date.now;
-  Date.now = () => now;
+  mock.timers.enable({ apis: ['setTimeout'] });
   try {
     const result = await run(args, agent, () => {}, () => {});
     return { result, events, opsLines };
   } finally {
-    Date.now = realNow;
+    mock.timers.reset();
   }
 }
 

@@ -1,7 +1,7 @@
 // Rev 10 of the tasks-engine spec: lock refreshes at agent boundaries, agent types from the ledger,
 // tasks that need acceptance, invalid task ids, path arguments, a one-line cut that keeps surrogate
 // pairs whole, named takeovers, and the engine's handling of failure paths and of `finish` answers.
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ENGINE, task } from './helpers/git-sandbox.mjs';
@@ -12,11 +12,11 @@ const body = readFileSync(ENGINE, 'utf8').replace(/^export\s+/m, '');
 const GOOD_REVIEW = { verdict: 'verified', acceptance_met: true, scope_ok: true, constraints_ok: true, findings: [], evidence: 'ok' };
 const MINUTE = 60 * 1000;
 
-// Runs the engine against a fake helper and a fake clock. `answers` overrides the canned answer per
+// Runs the engine against a fake helper, with mocked timers. `answers` overrides the canned answer per
 // subcommand (a function of the parts after the ledger path and of the call count of that
-// subcommand). `implementer` and `reviewer` replace the task agents; `agentMinutes` is how far the
-// clock moves during every task agent call. `events` records ops lines and task agent calls in
-// order (`impl T1`, `impl T1 done`, `review T1`, `review T1 done`).
+// subcommand). `implementer` and `reviewer` replace the task agents; `agentMinutes` is how far every
+// task agent call advances the mocked timers, once it is done. `events` records ops lines and task
+// agent calls in order (`impl T1`, `impl T1 done`, `review T1`, `review T1 done`).
 async function runEngine(ledgerTasks, opts = {}) {
   const {
     answers = {},
@@ -34,7 +34,6 @@ async function runEngine(ledgerTasks, opts = {}) {
   const agentTypes = [];
   const counts = {};
   let calls = 0;
-  let now = Date.UTC(2026, 9, 5);
   const canned = {
     prepare: () => ({ ok: true, start, integration: '/tmp/int', prs: false, tasks: ledgerTasks, ...(agents !== undefined ? { agents } : {}) }),
     worktree: id => ({ ok: true, worktree: `/tmp/wt-${id}`, branch: `task/t/${id}`, base: 'main' }),
@@ -51,11 +50,11 @@ async function runEngine(ledgerTasks, opts = {}) {
       const role = isImpl ? 'impl' : 'review';
       agentTypes.push(`${role} ${options.agentType}`);
       events.push(`${role} ${id}`);
-      now += agentMinutes * MINUTE;
       try {
         return await (isImpl ? implementer : reviewer)(id, prompt);
       } finally {
         events.push(`${role} ${id} done`);
+        mock.timers.tick(agentMinutes * MINUTE);
       }
     }
     const line = prompt.match(/node "[^"]*" (.*)\n/)[1];
@@ -66,8 +65,7 @@ async function runEngine(ledgerTasks, opts = {}) {
     return { stdout: JSON.stringify(canned[op] ? canned[op](...rest, counts[op]) : { ok: true }) };
   };
   const args = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId: 'test1', ...extraArgs };
-  const realNow = Date.now;
-  Date.now = () => now;
+  mock.timers.enable({ apis: ['setTimeout'] });
   try {
     const result = await run(args, agent, () => {}, text => logs.push(String(text)));
     return { result, events, opsLines, logs, agentTypes, calls };
@@ -75,7 +73,7 @@ async function runEngine(ledgerTasks, opts = {}) {
     error.agentCalls = calls;
     throw error;
   } finally {
-    Date.now = realNow;
+    mock.timers.reset();
   }
 }
 
