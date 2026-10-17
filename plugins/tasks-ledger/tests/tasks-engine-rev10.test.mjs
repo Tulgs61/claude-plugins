@@ -5,6 +5,7 @@ import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ENGINE, task } from './helpers/git-sandbox.mjs';
+import { fakeRelay } from './helpers/relay.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const body = readFileSync(ENGINE, 'utf8').replace(/^export\s+/m, '');
@@ -28,6 +29,7 @@ async function runEngine(ledgerTasks, opts = {}) {
     agentMinutes = 0,
   } = opts;
   const run = new AsyncFunction('args', 'agent', 'phase', 'log', body);
+  const reply = fakeRelay();
   const events = [];
   const opsLines = [];
   const logs = [];
@@ -62,7 +64,7 @@ async function runEngine(ledgerTasks, opts = {}) {
     events.push(line);
     const [op, , ...rest] = line.replace(/"/g, '').split(' ');
     counts[op] = (counts[op] || 0) + 1;
-    return { stdout: JSON.stringify(canned[op] ? canned[op](...rest, counts[op]) : { ok: true }) };
+    return reply(op, rest[0], canned[op] ? canned[op](...rest, counts[op]) : { ok: true });
   };
   const args = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId: 'test1', ...extraArgs };
   mock.timers.enable({ apis: ['setTimeout'] });

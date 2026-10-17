@@ -5,6 +5,7 @@ import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ENGINE, task } from './helpers/git-sandbox.mjs';
+import { fakeRelay } from './helpers/relay.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const body = readFileSync(ENGINE, 'utf8').replace(/^export\s+/m, '');
@@ -51,6 +52,7 @@ function runtimeClockRules() {
 function startEngine(ledgerTasks, opts = {}) {
   const { answers = {}, implementer = () => 'done', reviewer = () => GOOD_REVIEW } = opts;
   const run = new AsyncFunction('args', 'agent', 'phase', 'log', body);
+  const reply = fakeRelay();
   const state = { minute: 0, agentsInProgress: 0 };
   const events = [];
   const opsLines = [];
@@ -119,7 +121,7 @@ function startEngine(ledgerTasks, opts = {}) {
     counts[op] = (counts[op] || 0) + 1;
     const answer = canned[op] ? await canned[op](...rest, counts[op], state) : { ok: true };
     if (op === 'sync') syncs.push({ minute: state.minute, during: state.agentsInProgress > 0, ok: answer.ok === true });
-    return { stdout: JSON.stringify(answer) };
+    return reply(op, rest[0], answer);
   };
   const args = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId: 'test1' };
   let restored = false;
@@ -254,13 +256,13 @@ test('no timer after the end: neither after a normal run nor after one whose mai
     normal.done();
   }
 
-  // The sync after T1 reports T2 with a title that cannot be turned into text (an object whose
-  // `toString` is no function). Starting T2 then throws inside the main loop, which ends in its catch
-  // while the refresh timer that this successful sync armed is pending.
+  // The sync after T1 reports a task whose id cannot be turned into text (an object whose
+  // `toString` is no function). Taking in that answer then throws inside the main loop, which ends in
+  // its catch while the refresh timer that this successful sync armed is pending.
   const caught = startEngine([task('T1', ['src/**'])], {
     implementer: longAgent(5, 'done'),
     answers: {
-      sync: (_runId, n) => ({ ok: true, tasks: n === 2 ? [task('T2', ['lib/**'], [], { title: { toString: 1 } })] : [] }),
+      sync: (_runId, n) => ({ ok: true, tasks: n === 2 ? [{ ...task('T2', ['lib/**']), id: { toString: 1 } }] : [] }),
     },
   });
   try {

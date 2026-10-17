@@ -54,6 +54,36 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ## tasks-ledger
 
+### [0.5.0] - 2026-10-17
+
+#### Fixed
+
+- The workflow no longer acts on helper answers that the relaying agent abridged or changed. On a large
+  ledger, a relay returned a shortened but still valid `prepare` answer whose tasks had lost their
+  acceptance, proof and budget, and the workflow blocked every task as not dispatchable. Every line
+  `tasks-git.js` prints now ends with a check over its payload (`len`, `sum`: the length and the FNV-1a
+  32-bit hash of the payload's JSON text). The workflow recomputes it on every relayed answer. A missing
+  or mismatching check counts as a failed attempt and the command is run again, up to 3 times. After
+  that the call fails with `helper answer was altered in transit`.
+- `merge` run again for a task it already merged answers as the merge did and changes nothing. Before,
+  a retried `merge` failed because the task was no longer `verified`.
+
+#### Changed
+
+- `prepare`, `sync` and `finish` list only each task's scheduling fields (`id`, `status`, `dependsOn`,
+  `files`, `branch`, `base`, `worktree`, `pr`, `needsAcceptance`, and `resumeVerified` when the ledger
+  has it), which keeps answers short. A task without an acceptance that lacks a proof or a budget is
+  listed with `needsAcceptance: true`.
+- The workflow tells the ops agent to copy the helper's answer verbatim however long it is, and names
+  the check it will verify.
+
+#### Added
+
+- Helper command `task <ledger> <id>` returns one task's full dispatch record (title, acceptance, proof,
+  budget, constraints, files and the scheduling fields). The workflow fetches it right before
+  dispatching a task and builds the implementer and reviewer prompts from it. The proof, budget and
+  acceptance checks use that record.
+
 ### [0.4.1] - 2026-10-06
 
 #### Security

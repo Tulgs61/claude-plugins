@@ -13,8 +13,9 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { ENGINE, SCRIPT } from './helpers/git-sandbox.mjs';
+import { sealed } from './helpers/relay.mjs';
 
-const HELPER_COMMANDS = ['finish', 'merge', 'prepare', 'prs', 'status', 'sync', 'verify', 'worktree'];
+const HELPER_COMMANDS = ['finish', 'merge', 'prepare', 'prs', 'status', 'sync', 'task', 'verify', 'worktree'];
 const ENGINE_ARGS = ['implementerAgent', 'ledger', 'reviewerAgent', 'runId', 'script', 'takeover'];
 const SKILLS = ['dispatch', 'tasks', 'tasks-plan'];
 
@@ -66,7 +67,7 @@ async function engineArgs() {
     { ledger: '/tmp/x/.claude/runs/l.json', script: '/tmp/tasks-git.js', runId: 'vocab-check' },
     { get(target, key) { if (typeof key === 'string') read.add(key); return target[key]; } }
   );
-  const agent = async () => ({ stdout: JSON.stringify({ ok: false, error: 'vocabulary check' }) + '\n' });
+  const agent = async () => ({ stdout: sealed({ ok: false, error: 'vocabulary check' }) + '\n' });
   const result = await new AsyncFunction('args', 'agent', 'phase', 'log', body)(args, agent, () => {}, () => {});
   assert.match(String(result.stopped), /vocabulary check/);
   return [...read].sort();

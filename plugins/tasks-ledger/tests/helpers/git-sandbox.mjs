@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkOf } from './relay.mjs';
 
 export const SCRIPT = fileURLToPath(new URL('../../scripts/tasks-git.js', import.meta.url));
 export const ENGINE = fileURLToPath(new URL('../../workflows/tasks-engine.js', import.meta.url));
@@ -119,7 +120,10 @@ export function sandbox(t, opts = {}) {
       assert.equal(r.status, 0, `tasks-git ${args.join(' ')} exited ${r.status}: ${r.stderr}`);
       const lines = r.stdout.split('\n').filter(Boolean);
       assert.equal(lines.length, 1, `tasks-git ${args.join(' ')} printed ${lines.length} lines: ${r.stdout}`);
-      return JSON.parse(lines[0]);
+      // Every answer carries the relay check over its payload; the payload is returned without it.
+      const { len, sum, ...payload } = JSON.parse(lines[0]);
+      assert.deepEqual({ len, sum }, checkOf(payload), `tasks-git ${args.join(' ')} answer fails its check: ${lines[0]}`);
+      return payload;
     },
     // run('worktree', 'T1') -> node tasks-git.js worktree <ledger> T1
     run(cmd, ...rest) {

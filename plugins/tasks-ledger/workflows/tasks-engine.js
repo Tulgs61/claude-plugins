@@ -8,7 +8,9 @@ export const meta = {
 
 // tasks-engine workflow. The body runs with the injected `args`, `agent`, `phase` and `log`; it has
 // no file access, so every ledger and git side effect goes through scripts/tasks-git.js, which an
-// "ops" agent runs and whose single JSON answer line it hands back.
+// "ops" agent runs and whose single JSON answer line it hands back. Every answer line carries a
+// check over its payload (`len`, `sum`); an answer the relay shortened or changed fails the check and
+// the command is run again.
 
 const AGENT_NAME = /^[A-Za-z0-9:_-]+$/;
 const RUN_ID = /^[A-Za-z0-9-]{4,64}$/;
@@ -95,7 +97,10 @@ function oneLine(reason) {
 const OPS_SCHEMA = {
   type: 'object',
   properties: {
-    stdout: { type: 'string', description: 'The complete, unmodified standard output of the command.' },
+    stdout: {
+      type: 'string',
+      description: 'The complete standard output of the command, copied verbatim however long it is.',
+    },
   },
   required: ['stdout'],
   additionalProperties: false,
@@ -111,9 +116,44 @@ function opsPrompt(command) {
     '',
     `node "${scriptPath}" ${command}`,
     '',
-    'Answer with `stdout` set to the complete standard output of that one run, character for',
-    'character, without summarising, reformatting or adding anything.',
+    'Answer with `stdout` set to the complete standard output of that one run, copied verbatim,',
+    'character for character, however long it is. Do not summarise, shorten, abridge or truncate it;',
+    'do not reformat, pretty-print, re-indent or reorder it; do not drop, rename or add any field; do',
+    'not add any comment or explanation. The line ends with a check over its content (`len` and',
+    '`sum`): the workflow rejects any copy that differs from what the command printed and runs the',
+    'command again.',
   ].join('\n');
+}
+
+// BEGIN relay-check
+// The check every answer line carries, so a relayed copy that was shortened or changed is detected.
+// `len` is the length (UTF-16 units) of the canonical text of the payload, JSON.stringify of the
+// answer without its check fields; `sum` is the FNV-1a 32-bit hash of that text's UTF-16LE bytes, as
+// eight lowercase hex digits. JSON.stringify(JSON.parse(line)) reproduces the canonical text, so the
+// check holds for any copy that parses to the same keys and values in the same order. Pure JS: no
+// node:crypto, which the workflow runtime may lack. `len` and `sum` are never payload keys.
+function relaySum(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    const unit = text.charCodeAt(i);
+    h = Math.imul(h ^ (unit & 0xff), 0x01000193);
+    h = Math.imul(h ^ (unit >>> 8), 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+function relayCheck(payload) {
+  const canonical = JSON.stringify(payload);
+  return { len: canonical.length, sum: relaySum(canonical) };
+}
+// END relay-check
+
+// The payload of an answer whose check holds, without the check fields, or null.
+function checkedPayload(value) {
+  const { len, sum, ...payload } = value;
+  if (typeof len !== 'number' || typeof sum !== 'string') return null;
+  const check = relayCheck(payload);
+  return check.len === len && check.sum === sum ? payload : null;
 }
 
 function lastJsonObject(stdout) {
@@ -147,20 +187,34 @@ function serialised(fn) {
   return run;
 }
 
+// An answer without a check, or one whose check fails, is a failed attempt, never an answer.
 async function runOps(command) {
+  const name = command.split(' ')[0];
+  let altered = 0;
   for (let attempt = 1; attempt <= OPS_ATTEMPTS; attempt++) {
     let result;
     try {
       result = await agent(opsPrompt(command), { schema: OPS_SCHEMA });
     } catch (error) {
       result = null;
-      log(`helper call failed (${command.split(' ')[0]}): ${error && error.message}`);
+      log(`helper call failed (${name}): ${error && error.message}`);
     }
     if (result != null) {
       const stdout = typeof result === 'string' ? result : result.stdout;
       const answer = lastJsonObject(stdout);
-      if (answer) return answer; // an `ok: false` answer is final
+      if (answer) {
+        const payload = checkedPayload(answer);
+        if (payload) return payload; // an `ok: false` answer is final
+        altered++;
+        log(`helper answer failed its check (${name}, attempt ${attempt} of ${OPS_ATTEMPTS})`);
+      }
     }
+  }
+  if (altered > 0) {
+    return {
+      ok: false,
+      error: `helper answer was altered in transit: ${altered} of ${OPS_ATTEMPTS} relayed answers to ${name} failed their check`,
+    };
   }
   return { ok: false, error: `no answer from the helper after ${OPS_ATTEMPTS} attempts` };
 }
@@ -346,13 +400,20 @@ const needAcceptance = []; // ids of tasks with `needsAcceptance: true`
 const aside = new Map();
 
 // Why a task can never start, or null. The helper refuses ledgers with invalid ids; this is the
-// second line of defence. A title-only task without proof or budget needs acceptance as well.
+// second line of defence. The summary's `needsAcceptance` also covers a title-only task without
+// proof or budget; `driveTask` checks the dispatch record fetched before a task starts again.
 function asideNote(t) {
   if (!TASK_ID.test(t.id)) return 'invalid task id: not of the form T<n>';
   if (t.status !== 'todo' && t.status !== 'verified') return null;
   if (t.needsAcceptance === true) return 'needs acceptance';
-  if (!text(t.acceptance) && (!text(t.proof) || !text(t.budget))) return 'needs acceptance';
   return null;
+}
+
+// Sets a task aside from a later answer (its dispatch record), as `learn` does.
+function setAsideLate(t, note) {
+  if (aside.has(t.id)) return;
+  aside.set(t.id, note);
+  needAcceptance.push(t.id);
 }
 
 // Adds the tasks not known yet and returns them; a known task is never removed or overwritten.
@@ -429,9 +490,30 @@ async function verify(t) {
   return { ok: false, error: answer.error || 'verify failed', output };
 }
 
+// The task's full dispatch record (title, acceptance, proof, budget, constraints, files), fetched
+// through the checked relay right before the task is dispatched, or { error }.
+async function fetchRecord(t) {
+  const answer = await ops('task', t.id);
+  if (!answer.ok) return { error: answer.error || 'unknown error' };
+  const record = answer.task;
+  if (!record || typeof record !== 'object' || Array.isArray(record) || record.id !== t.id) {
+    return { error: `the helper returned no record for ${t.id}` };
+  }
+  return { record };
+}
+
 async function driveTask(t) {
   if (t.status === 'verified') return merge(t); // resumed: reviewed in an earlier run
-  if (!text(t.proof) || !text(t.budget)) return block(t, 'not dispatchable: the task has no proof or no budget');
+
+  const fetched = await fetchRecord(t);
+  if (fetched.error) return block(t, `could not read the task record: ${fetched.error}`);
+  // The record decides what the agents are told; the summary only scheduled the task.
+  const r = { ...fetched.record, id: t.id };
+  if (r.needsAcceptance === true || (!text(r.acceptance) && (!text(r.proof) || !text(r.budget)))) {
+    setAsideLate(t, 'needs acceptance');
+    return block(t, 'needs acceptance', false);
+  }
+  if (!text(r.proof) || !text(r.budget)) return block(t, 'not dispatchable: the task has no proof or no budget');
 
   const place = await ops('worktree', t.id);
   if (!place.ok) return block(t, `worktree failed: ${place.error || 'unknown error'}`);
@@ -440,20 +522,20 @@ async function driveTask(t) {
   if (!isGitRef(place.base)) return block(t, 'worktree failed: the helper returned an invalid base ref');
   const diffBase = place.base.startsWith('task/') ? place.base : prepared.start || place.base;
 
-  if ((await runAgent(implementerPrompt(t, place), { agentType: implementerType })) == null) {
+  if ((await runAgent(implementerPrompt(r, place), { agentType: implementerType })) == null) {
     return block(t, 'the implementer did not finish');
   }
   let checked = await verify(t);
   if (!checked.ok) {
     log(`${t.id}: verification failed (${checked.error}); one more implementer attempt`);
-    if ((await runAgent(implementerPrompt(t, place, checked.output), { agentType: implementerType })) == null) {
+    if ((await runAgent(implementerPrompt(r, place, checked.output), { agentType: implementerType })) == null) {
       return block(t, `the implementer did not finish its retry after: ${checked.error}`);
     }
     checked = await verify(t);
     if (!checked.ok) return block(t, `verification failed twice: ${checked.error}`);
   }
 
-  const review = await runAgent(reviewerPrompt(t, place, diffBase, checked.tail), {
+  const review = await runAgent(reviewerPrompt(r, place, diffBase, checked.tail), {
     agentType: reviewerType,
     schema: REVIEW_SCHEMA,
   });
@@ -489,7 +571,7 @@ function ready(t) {
 }
 
 function start(t) {
-  log(`${t.id} started: ${text(t.title)}`);
+  log(`${t.id} started`);
   const promise = driveTask(t)
     .catch(error => block(t, `unexpected error: ${(error && error.message) || error}`))
     .catch(error => finishTask(t, 'blocked', `unexpected error: ${(error && error.message) || error}`))

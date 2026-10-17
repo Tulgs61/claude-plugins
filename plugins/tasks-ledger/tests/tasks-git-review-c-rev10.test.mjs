@@ -168,10 +168,9 @@ test('amendment 29: a ledger swapped for a FIFO after its check never blocks the
     assert.match(r.error, /not a regular file/);
     return;
   }
-  // The listing comes from the original ledger, not from the FIFO.
+  // The listing (the scheduling summary) comes from the original ledger, not from the FIFO.
   const expected = [{
-    acceptance: 'acceptance of T1', base: null, branch: null, budget: '5 turns', constraints: [], dependsOn: [], files: [],
-    id: 'T1', needsAcceptance: false, pr: null, proof: 'true', status: 'todo', title: 'task T1', worktree: null,
+    base: null, branch: null, dependsOn: [], files: [], id: 'T1', needsAcceptance: false, pr: null, status: 'todo', worktree: null,
   }];
   assert.deepEqual(r.tasks, expected);
 });

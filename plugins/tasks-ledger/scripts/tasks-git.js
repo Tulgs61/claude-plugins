@@ -14,8 +14,12 @@ const TASK_KEYS = [
   'acceptance', 'base', 'branch', 'budget', 'constraints', 'dependsOn', 'evidence',
   'files', 'id', 'needsAcceptance', 'pr', 'proof', 'status', 'title', 'worktree',
 ];
-const LISTING_LISTS = ['constraints', 'dependsOn', 'files'];
-const LISTING_SCALARS = ['acceptance', 'base', 'branch', 'budget', 'id', 'pr', 'proof', 'status', 'title', 'worktree'];
+// The fields of the full record of one task (`task`) and of the short listing of every task. The
+// listing stays small: long relayed answers are the ones that get shortened.
+const RECORD_LISTS = ['constraints', 'dependsOn', 'files'];
+const RECORD_SCALARS = ['acceptance', 'base', 'branch', 'budget', 'id', 'pr', 'proof', 'status', 'title', 'worktree'];
+const SUMMARY_LISTS = ['dependsOn', 'files'];
+const SUMMARY_SCALARS = ['base', 'branch', 'id', 'pr', 'status', 'worktree'];
 const ID_RE = /^T[0-9]+$/;
 const INBOX_ID_RE = /^T[0-9]{1,9}$/;
 const TOPIC_RE = /^[a-z0-9][a-z0-9-]*$/;
@@ -70,6 +74,29 @@ function globListsOverlap(as, bs) {
   return as.some(a => bs.some(b => globsOverlap(a, b)));
 }
 // END glob-overlap
+
+// BEGIN relay-check
+// The check every answer line carries, so a relayed copy that was shortened or changed is detected.
+// `len` is the length (UTF-16 units) of the canonical text of the payload, JSON.stringify of the
+// answer without its check fields; `sum` is the FNV-1a 32-bit hash of that text's UTF-16LE bytes, as
+// eight lowercase hex digits. JSON.stringify(JSON.parse(line)) reproduces the canonical text, so the
+// check holds for any copy that parses to the same keys and values in the same order. Pure JS: no
+// node:crypto, which the workflow runtime may lack. `len` and `sum` are never payload keys.
+function relaySum(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    const unit = text.charCodeAt(i);
+    h = Math.imul(h ^ (unit & 0xff), 0x01000193);
+    h = Math.imul(h ^ (unit >>> 8), 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+function relayCheck(payload) {
+  const canonical = JSON.stringify(payload);
+  return { len: canonical.length, sum: relaySum(canonical) };
+}
+// END relay-check
 
 // ---- answers -----------------------------------------------------------------------------------
 
@@ -301,14 +328,35 @@ function validateLedger(L) {
   }
 }
 
+const filled = value => typeof value === 'string' && value.trim() !== '';
+
+// Whether the engine must set the task aside: it is marked so, or it has no acceptance and lacks a
+// proof or a budget (a title-only task).
+const needsAcceptanceOf = t => t.needsAcceptance === true || (!filled(t.acceptance) && (!filled(t.proof) || !filled(t.budget)));
+
+function pick(t, lists, scalars) {
+  const o = {};
+  for (const k of lists) o[k] = Array.isArray(t[k]) ? t[k] : [];
+  for (const k of scalars) o[k] = t[k] === undefined ? null : t[k];
+  return o;
+}
+
+// The scheduling summary of every task: what the engine needs to order, set aside and resume tasks.
+// The dispatch fields (title, acceptance, proof, budget, constraints) come from `task`.
 function listing(L) {
   return L.tasks.map(t => {
-    const o = {};
-    for (const k of LISTING_LISTS) o[k] = Array.isArray(t[k]) ? t[k] : [];
-    for (const k of LISTING_SCALARS) o[k] = t[k] === undefined ? null : t[k];
-    o.needsAcceptance = t.needsAcceptance === true;
+    const o = pick(t, SUMMARY_LISTS, SUMMARY_SCALARS);
+    o.needsAcceptance = needsAcceptanceOf(t);
+    if (t.resumeVerified !== undefined) o.resumeVerified = t.resumeVerified;
     return o;
   });
+}
+
+// One task's full dispatch record. `needsAcceptance` is the ledger's own mark.
+function taskRecord(t) {
+  const o = pick(t, RECORD_LISTS, RECORD_SCALARS);
+  o.needsAcceptance = t.needsAcceptance === true;
+  return o;
 }
 
 function findTask(ctx, id) {
@@ -944,6 +992,12 @@ function opStatus(ctx, [id, status, evidence]) {
   return { id, status };
 }
 
+// task <id>: the full dispatch record of one task, read from the ledger as it is now.
+function opTask(ctx, [id]) {
+  if (typeof id !== 'string' || !ID_RE.test(id)) fail(`bad task id ${JSON.stringify(id)}: must match ${ID_RE}`);
+  return { task: taskRecord(findTask(ctx, id)) };
+}
+
 // Ingests the inbox and refreshes the lock under the guard, so overlapping calls process the inbox one after
 // the other from the ledger as the previous one left it.
 function opSync(ctx, [runId]) {
@@ -1235,14 +1289,20 @@ function opMerge(ctx, [id]) {
   const intBranch = L.integrationBranch || integrationBranchName(ctx);
   const integration = worktreeOfBranch(ctx.root, intBranch);
   if (!integration) fail('integration worktree missing');
+  const branch = taskBranch(ctx, id);
+  const inIntegration = () => git(integration, 'merge-base', '--is-ancestor', branch, 'HEAD').status === 0;
+  // A repeated call for a task already merged (the engine runs a command again when its relayed
+  // answer was lost or altered) changes nothing and answers as the merge did.
+  if (t.status === 'merged' && hasBranch(ctx.root, branch) && inIntegration()) {
+    return { id, sha: gitOk(integration, 'rev-parse', '--short', 'HEAD'), already: true };
+  }
   if (t.status !== 'verified') fail(`${id} is ${t.status}, only verified tasks merge`);
 
-  const branch = taskBranch(ctx, id);
   if (!hasBranch(ctx.root, branch)) fail(`${id}: branch ${branch} does not exist`);
   refuseVerifyCmdChange(ctx, t);
 
   // Already merged: nothing is merged, so no verify command is needed.
-  if (git(integration, 'merge-base', '--is-ancestor', branch, 'HEAD').status === 0) {
+  if (inIntegration()) {
     const sha = gitOk(integration, 'rev-parse', '--short', 'HEAD');
     markMerged(ctx, id, `already in ${intBranch} @ ${sha}`);
     return { id, sha, already: true };
@@ -1412,6 +1472,7 @@ const COMMANDS = {
   prs: opPrs,
   status: opStatus,
   sync: opSync,
+  task: opTask,
   verify: opVerify,
   worktree: opWorktree,
 };
@@ -1452,5 +1513,5 @@ try {
     ? { ok: false, error: e.message, ...e.extra }
     : { ok: false, error: `unexpected error: ${e && e.message ? e.message : String(e)}` };
 }
-process.stdout.write(JSON.stringify(answer) + '\n');
+process.stdout.write(JSON.stringify({ ...answer, ...relayCheck(answer) }) + '\n');
 process.exitCode = 0;
