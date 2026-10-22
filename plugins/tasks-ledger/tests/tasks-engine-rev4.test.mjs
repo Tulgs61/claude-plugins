@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ENGINE, task } from './helpers/git-sandbox.mjs';
+import { fakeRelay } from './helpers/relay.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const body = readFileSync(ENGINE, 'utf8').replace(/^export\s+/m, '');
@@ -15,6 +16,7 @@ const GOOD_REVIEW = { verdict: 'verified', acceptance_met: true, scope_ok: true,
 // (a function of the task id), `review` replaces the reviewer's result.
 async function runEngine(ledgerTasks, { answers = {}, review = GOOD_REVIEW } = {}) {
   const run = new AsyncFunction('args', 'agent', 'phase', 'log', body);
+  const reply = fakeRelay();
   const commands = [];
   const reviewerPrompts = [];
   const implementerPrompts = [];
@@ -38,7 +40,7 @@ async function runEngine(ledgerTasks, { answers = {}, review = GOOD_REVIEW } = {
     const cmd = prompt.match(/node "[^"]*" (.*)\n/)[1].replace(/"/g, '');
     commands.push(cmd);
     const [op, , id] = cmd.split(' ');
-    return { stdout: JSON.stringify(canned[op] ? canned[op](id) : { ok: true }) };
+    return reply(op, id, canned[op] ? canned[op](id) : { ok: true });
   };
   const args = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId: 'test1' };
   const result = await run(args, agent, () => {}, () => {});

@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import vm from 'node:vm';
+import { fakeRelay } from './helpers/relay.mjs';
 
 const ENGINE = fileURLToPath(new URL('../workflows/tasks-engine.js', import.meta.url));
 const source = readFileSync(ENGINE, 'utf8');
@@ -119,6 +120,7 @@ test('the whole engine compiles as an async workflow body', () => {
 // contracts start with `TASK:`, every other typed call is the reviewer.
 async function runEngine(ledgerTasks, extraArgs = {}) {
   const run = new AsyncFunction('args', 'agent', 'phase', 'log', body);
+  const reply = fakeRelay();
   const active = new Set();
   const concurrent = [];
   const agentTypes = { implementer: new Set(), reviewer: new Set() };
@@ -156,7 +158,7 @@ async function runEngine(ledgerTasks, extraArgs = {}) {
       return { verdict: 'verified', acceptance_met: true, scope_ok: true, constraints_ok: true, findings: [], evidence: 'ok' };
     }
     const cmd = prompt.match(/node "[^"]*" (.*)\n/)[1].replace(/"/g, '');
-    return { stdout: JSON.stringify(answer(cmd)) };
+    return reply(cmd.split(' ')[0], cmd.split(' ')[2], answer(cmd));
   };
   const engineArgs = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId: 'test1', ...extraArgs };
   let result;

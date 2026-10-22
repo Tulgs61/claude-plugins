@@ -39,6 +39,23 @@ and does not stop the run. Two limits remain:
 - The refresh timer does not run while the host process is suspended, for example while the computer
   sleeps.
 
+### Relayed helper answers
+
+The workflow script has no file access, so an agent runs each `scripts/tasks-git.js` call and copies
+its one JSON line back. That copy is checked. Every line the helper prints ends with `len` and `sum`:
+the length of the JSON text of the rest of the answer and its FNV-1a 32-bit hash. The workflow
+recomputes both on the copy it receives. A copy that was shortened, changed, reordered or that lacks
+the check counts as a failed attempt, and the command is run again, up to 3 times. After that the
+call fails with `helper answer was altered in transit`. A changed answer is never used, even an
+`ok: false` one. Whitespace around the JSON values does not count as a change.
+
+The helper also keeps answers short, since long answers are the ones relays tend to abridge. `prepare`,
+`sync` and `finish` list only each task's scheduling fields (`id`, `status`, `dependsOn`, `files`,
+`branch`, `base`, `worktree`, `pr` and `needsAcceptance`). Right before a task is dispatched, the
+workflow fetches its full record with `task <ledger> <id>` and takes the title, acceptance, proof,
+budget and constraints for the implementer and reviewer prompts from there. A task is blocked as not
+dispatchable only when that record has no proof or no budget.
+
 ## Skills
 
 | Skill | What it does |
