@@ -328,7 +328,9 @@ function validateLedger(L) {
   }
 }
 
-const filled = value => typeof value === 'string' && value.trim() !== '';
+// Whether a field has a value: any value that is not null or undefined and whose text is not blank,
+// as the engine counted it before 0.5.0. A number counts; an empty or blank string does not.
+const filled = value => value != null && String(value).trim() !== '';
 
 // Whether the engine must set the task aside: it is marked so, or it has no acceptance and lacks a
 // proof or a budget (a title-only task).
@@ -347,7 +349,6 @@ function listing(L) {
   return L.tasks.map(t => {
     const o = pick(t, SUMMARY_LISTS, SUMMARY_SCALARS);
     o.needsAcceptance = needsAcceptanceOf(t);
-    if (t.resumeVerified !== undefined) o.resumeVerified = t.resumeVerified;
     return o;
   });
 }
