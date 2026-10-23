@@ -314,7 +314,7 @@ test('amendment 10: a failed carry-over write never truncates lines another writ
   const warnings = notCarried(r);
   assert.equal(warnings.length, 1, JSON.stringify(r));
   assert.ok(warnings[0].includes('; the inbox may hold part of these lines'), warnings[0]);
-  assert.ok(warnings[0].includes('lines appended after them may be unreadable'), warnings[0]);
+  assert.ok(warnings[0].includes('the next sync drops the incomplete line and still reads the appended one'), warnings[0]);
   assert.ok(warnings[0].includes(sb.inboxFile), `the warning names ${sb.inboxFile}: ${warnings[0]}`);
   assert.ok(readFileSync(sb.inboxFile, 'utf8').includes(EXTRA_LINE), 'the inbox still holds the other writer\'s line');
 });

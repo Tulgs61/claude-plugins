@@ -39,6 +39,7 @@ const OPEN_NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
 const OPEN_NONBLOCK = fs.constants.O_NONBLOCK || 0;
 const OPEN_CREATE_NEW = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | OPEN_NOFOLLOW;
 const TAIL_MAX = 2000;
+const JOINED_LINE_TRIES = 64;
 const PERMANENT_BRANCHES = ['main', 'master', 'develop', 'trunk'];
 
 // BEGIN glob-overlap
@@ -816,7 +817,8 @@ function refreshLockGuarded(ctx, runId) {
 // an inbox this call created), but only while its size is still that plus the bytes this call wrote,
 // so lines another writer appended meanwhile are never cut. Returns 'written'; 'skipped' when nothing
 // is left written, in every other case; 'joined' when another writer appended after bytes this call
-// wrote, so its lines may be unreadable; or 'partial' when the file was otherwise not truncated back.
+// wrote, so its first line is joined to the incomplete line written last (ingestion still reads it,
+// see parseInboxLine); or 'partial' when the file was otherwise not truncated back.
 // Errors from closing are ignored.
 function carryOver(inboxFile, text) {
   const closeQuietly = fd => {
@@ -857,7 +859,8 @@ function carryOver(inboxFile, text) {
   } catch {
     try {
       // Another writer appended meanwhile: after bytes of this call, the line written last is
-      // incomplete and the other writer's line is joined to it.
+      // incomplete and the other writer's line is joined to it; ingestion reads that line from its
+      // ending.
       if (fs.fstatSync(fd).size !== size + wrote) return wrote > 0 ? 'joined' : 'partial';
       fs.ftruncateSync(fd, size);
       return 'skipped';
@@ -867,6 +870,31 @@ function carryOver(inboxFile, text) {
   } finally {
     closeQuietly(fd);
   }
+}
+
+// Parses one inbox line. A line that is not valid JSON may be the incomplete line a failed carry-over
+// left, with a line another writer appended joined to it (see carryOver). Its ending is then read
+// instead: starting at the last `{` of the line and moving left, the first ending that parses as a
+// JSON value is taken, so the joined line is read whole and the incomplete part before it is dropped.
+// At most JOINED_LINE_TRIES positions are tried per line, which bounds the work on a hostile line.
+// Returns the parsed value, or undefined when nothing parses.
+function parseInboxLine(line) {
+  try {
+    return JSON.parse(line);
+  } catch {
+    // Tried from its ending below.
+  }
+  let p = line.length;
+  for (let tries = 0; tries < JOINED_LINE_TRIES; tries++) {
+    p = line.lastIndexOf('{', p - 1);
+    if (p <= 0) return undefined;
+    try {
+      return JSON.parse(line.slice(p));
+    } catch {
+      // A position further left may start the joined line.
+    }
+  }
+  return undefined;
 }
 
 // Reads the inbox and appends its valid entries to ctx.L.tasks. Returns the added ids and a
@@ -890,12 +918,7 @@ function ingestInbox(ctx) {
 
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
-    let o;
-    try {
-      o = JSON.parse(line);
-    } catch {
-      continue;
-    }
+    const o = parseInboxLine(line);
     if (!o || typeof o !== 'object' || Array.isArray(o)) continue;
     if (typeof o.title !== 'string' || o.title === '') continue;
 
@@ -964,7 +987,7 @@ function ingestInbox(ctx) {
     if (carried === 'written') return [];
     const warning = `lines appended to the inbox after it was read were not carried over; they remain in ${kept}`;
     if (carried === 'joined') {
-      return [`${warning}; the inbox may hold part of these lines, and lines appended after them may be unreadable; check ${ctx.inboxFile}`];
+      return [`${warning}; the inbox may hold part of these lines, and a line another writer appended is joined to the last, incomplete one; the next sync drops the incomplete line and still reads the appended one; check ${ctx.inboxFile}`];
     }
     return [carried === 'partial' ? `${warning}; the inbox may hold part of these lines` : warning];
   };
