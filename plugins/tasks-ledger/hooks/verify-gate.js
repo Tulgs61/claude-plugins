@@ -88,8 +88,15 @@ function clampFailures(n) {
   return Number.isInteger(n) ? Math.min(Math.max(n, 0), MAX_FAILURES) : 0;
 }
 
-const CLEAN = { dirty: false, failures: 0, looseWarned: false, consentAsked: false };
-const UNREADABLE = { dirty: true, failures: 0, looseWarned: false, consentAsked: false };
+const CLEAN = { dirty: false, failures: 0, looseWarned: false, consentAskedDirs: [] };
+const UNREADABLE = { dirty: true, failures: 0, looseWarned: false, consentAskedDirs: [] };
+
+// The check directories (real paths) whose approval request this session and project already showed.
+// Anything but an array of strings counts as none; the boolean consentAsked of earlier versions did not
+// say which directory it asked about, so it is ignored and that directory is asked about once more.
+function askedDirs(value) {
+  return Array.isArray(value) ? [...new Set(value.filter(d => typeof d === 'string' && d !== ''))] : [];
+}
 
 // The file is gone (or a path component is not a directory), possibly removed since it was inspected.
 function missing(e) {
@@ -123,7 +130,7 @@ function readState(file) {
       dirty: state.dirty === true,
       failures: clampFailures(state.failures),
       looseWarned: state.looseWarned === true,
-      consentAsked: state.consentAsked === true,
+      consentAskedDirs: askedDirs(state.consentAskedDirs),
     };
   } catch {
     return UNREADABLE;
@@ -138,7 +145,8 @@ function readState(file) {
 function writeState(file, state) {
   const data = { dirty: state.dirty, failures: clampFailures(state.failures) };
   if (state.looseWarned) data.looseWarned = true;
-  if (state.consentAsked) data.consentAsked = true;
+  const asked = askedDirs(state.consentAskedDirs);
+  if (asked.length > 0) data.consentAskedDirs = asked;
   const tmp = `${file}.${crypto.randomBytes(8).toString('hex')}.tmp`;
   const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW, 0o600);
   let done = false;
@@ -482,12 +490,14 @@ async function onStop(input, session) {
 
   // A check runs only after this exact command was approved for this repository and the directory that
   // holds it (relative to the checkout's top level). Otherwise the stop
-  // passes and the session stays dirty; the first such stop per session and project asks for approval.
+  // passes and the session stays dirty; the first such stop per session and check directory asks for
+  // approval. The directory is remembered by its real path, so every symlinked spelling is asked about once.
   const consent = require(CONSENT_SCRIPT);
   if (!consent.isApproved(check.dir, check.command)) {
-    if (!state.consentAsked) {
+    const dir = realPathOf(check.dir);
+    if (!state.consentAskedDirs.includes(dir)) {
       systemMessage(approvalRequest(check.dir));
-      writeState(stateFile, { ...state, consentAsked: true });
+      writeState(stateFile, { ...state, consentAskedDirs: [...state.consentAskedDirs, dir] });
     }
     return 0;
   }
@@ -537,8 +547,8 @@ async function onStop(input, session) {
 function onEdit(input, session) {
   const cwd = eventCwd(input);
   const stateFile = stateFileFor(session, editProject(input, cwd));
-  const { looseWarned, consentAsked } = readState(stateFile);
-  writeState(stateFile, { dirty: true, failures: 0, looseWarned, consentAsked });
+  const { looseWarned, consentAskedDirs } = readState(stateFile);
+  writeState(stateFile, { dirty: true, failures: 0, looseWarned, consentAskedDirs });
   return 0;
 }
 
