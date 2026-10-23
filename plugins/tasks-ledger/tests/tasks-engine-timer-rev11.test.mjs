@@ -324,12 +324,25 @@ test('a failed sync right before a 35-minute implementer still arms the timer: h
   }
 });
 
-test('the timer fires while no task agent runs: the boundary before the reviewer refreshes the lock', async () => {
+test('the timer fires while no task agent runs: no sync while only verify runs, the boundary before the reviewer refreshes the lock', async () => {
+  // `verify` is not on the serialised helper path, so a heartbeat started while it runs would reach the
+  // helper during it. The timer fires 10 minutes into the 11-minute verify; no task agent is running.
+  let verifying = false;
+  const syncsDuringVerify = [];
   const engine = startEngine([task('T1', ['src/**'])], {
     answers: {
       verify: async (_id, _n, state) => {
-        await state.advance(11);
+        verifying = true;
+        try {
+          await state.advance(11);
+        } finally {
+          verifying = false;
+        }
         return { ok: true, tail: 'ok' };
+      },
+      sync: (_runId, _n, state) => {
+        if (verifying) syncsDuringVerify.push(state.minute);
+        return { ok: true, tasks: [] };
       },
     },
   });
@@ -337,6 +350,7 @@ test('the timer fires while no task agent runs: the boundary before the reviewer
     const result = await engine.promise;
     assert.equal(result.stopped, null, engine.logs.join('\n'));
     const { events } = engine;
+    assert.deepEqual(syncsDuringVerify, [], `sync sent at minute(s) ${syncsDuringVerify} while only verify ran\n${events.join('\n')}`);
     assert.ok(isSync(events[events.indexOf('review T1') - 1]), events.join('\n'));
     assert.ok(!engine.syncs.some(s => s.during), JSON.stringify(engine.syncs));
   } finally {

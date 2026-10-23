@@ -81,10 +81,11 @@ function storeFile(env = process.env) {
 const CONTROL_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 // Why a check directory below the top level cannot be stored, or null: it must be relative, without a
-// `..` segment or a control character (CONTROL_CHARS).
-function dirProblem(dir) {
+// `..` segment or a control character (CONTROL_CHARS). A segment ends at `/`, and on Windows also at `\`:
+// on POSIX a backslash is an ordinary character of a directory name, so `a\..\b` is one segment.
+function dirProblem(dir, platform = process.platform) {
   if (dir.startsWith('/') || path.isAbsolute(dir) || path.win32.isAbsolute(dir)) return 'it is an absolute path';
-  if (dir.split(/[\\/]/).includes('..')) return 'it contains a .. segment';
+  if (dir.split(platform === 'win32' ? /[\\/]/ : '/').includes('..')) return 'it contains a .. segment';
   if (CONTROL_CHARS.test(dir)) return 'it contains a control character';
   return null;
 }
@@ -576,7 +577,7 @@ function main(args) {
 }
 
 module.exports = {
-  CONTROL_CHARS, storeSelection, storeFile, readStore, shownPath, findProgram, untrustedDirs, repoIdentity, checkDir, commandHash, isApproved,
+  CONTROL_CHARS, dirProblem, storeSelection, storeFile, readStore, shownPath, findProgram, untrustedDirs, repoIdentity, checkDir, commandHash, isApproved,
   approve, revoke, list,
 };
 

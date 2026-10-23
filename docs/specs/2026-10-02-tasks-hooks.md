@@ -621,3 +621,55 @@ concern verify-gate and `scripts/verify-consent.js`. dispatch-guard is unchanged
      or the dir test file: `approve` in a check directory whose relative path holds U+202E exits 2 and
      records nothing (POSIX only). A probe test, marked as coverage and following the skip and `CI` rules
      of amendment 5, runs `pty-drive.py --probe` 20 times and expects exit 0 every time.
+
+## Amendments (rev 13)
+
+These amendments take precedence over every earlier section and amendment where they differ.
+Amendments 1 and 2 concern `scripts/verify-consent.js`; amendments 3 and 4 concern verify-gate's approval
+request. dispatch-guard is unchanged.
+
+1. **A backslash is not a separator in a check directory on POSIX.** Rev 11, amendment 4 refuses a
+   stored `dir` that contains `..` as a segment, and amendment 7 refuses the same check directory on
+   `approve`. A segment ends at `/`. On POSIX that is the only separator: a backslash is an ordinary
+   character of a directory name, so a real directory named `a\..\b` is one segment, `approve` records
+   it as `dir: "a\..\b"`, and a stored entry with that `dir` approves its check. On native Windows `\`
+   ends a segment too, so the same value is refused there.
+   - Unchanged: a `dir` that is absolute (by POSIX or by Windows rules, so one that starts with `\`
+     stays refused on POSIX), empty when present, holds a control character, or has a real `..`
+     segment (`a/../b`, `../x`) is invalid, and `approve` refuses such a check directory with exit 2.
+2. **Tests**, in `plugins/tasks-ledger/tests/hooks-verify-consent-backslash-rev13.test.mjs`. Each must be
+   able to fail on the commit before the change.
+   - POSIX only: `approve` in `<repo>/a\..\b`, answering `yes`, exits 0 and records `dir: "a\..\b"`; the
+     gate then runs that check.
+   - POSIX only: a store entry with `dir: "a\..\b"` approves the check in that directory; entries with
+     `a/../b` or `../x` are still ignored.
+   - On every platform, through the module's `dirProblem(dir, platform)`: with a POSIX platform,
+     `a\..\b` has no problem and `a/../b` and `../x` have a `..` segment; with `win32`, `a\..\b`,
+     `..\x` and `a/../b` all have a `..` segment; absolute paths and control characters are refused
+     for both.
+3. **The approval request is shown once per check directory.** Rev 10, amendment 10 shows the request
+   on the first unapproved stop per session and project and keeps later ones silent. Since approvals are
+   per check directory (rev 11), that silenced the request for a second check directory of the same
+   project. It now reads: on the first unapproved stop per session and **check directory** the gate
+   prints the request for that directory; later unapproved stops for a check directory already asked
+   about in that session and project stay silent.
+   - The session state keeps `consentAskedDirs`, an array of the real paths of the check directories
+     already asked about, in place of the boolean `consentAsked`. It is written only when not empty, an
+     edit keeps it, and it goes when the state file is removed (a passing check, or the last of
+     `MAX_FAILURES` failed runs). State writes stay atomic as in rev 10, amendment 4.
+   - Reading is lenient: a value that is not an array counts as empty, and entries that are not
+     non-empty strings are dropped. Neither makes the state file unreadable.
+   - A state file written by an earlier version with `consentAsked: true` is read as before for its
+     other fields. The old flag does not say which directory it asked about, so it is ignored and not
+     written back: the next unapproved stop shows its directory's request once more.
+   - So within one session and project: a stop at the top level shows its request; a later stop in an
+     unapproved subdirectory shows that subdirectory's request once; a repeated stop there is silent.
+     Every symlinked spelling of a directory counts as that directory.
+4. **Tests**, in `plugins/tasks-ledger/tests/hooks-verify-gate-asked-rev13.test.mjs`, POSIX only, each
+   able to fail on the commit before the change except where marked as a control: the order of
+   amendment 3 (top level, then subdirectory, then silence, also after an edit); a subdirectory asked
+   about first does not silence the top level; an approved top level does not count as asked for an
+   unapproved subdirectory (control); a symlinked spelling of a directory already asked about is
+   silent; a state file with `consentAsked: true` keeps its count and `looseWarned` and still shows each
+   directory's request once; a malformed `consentAskedDirs` counts as none. The state-file ownership test
+   of rev 10, amendment 22 carries `consentAskedDirs` instead of `consentAsked`.

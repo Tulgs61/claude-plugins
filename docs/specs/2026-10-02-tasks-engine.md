@@ -538,15 +538,25 @@ These amendments take precedence over every earlier section and amendment where 
        The assertions of the two amendment 14 tests stay as they are.
      No other kept test file changes. `tasks-engine.test.mjs` uses a real `setTimeout` only inside its
      fake agent and keeps passing because no timer outlives the run (amendment 3).
-6. **A due refresh always has a timer, and refreshes are never doubled.** This sharpens amendment 2.
+6. **A due refresh always has a timer, and a refresh in progress is never doubled.** This sharpens
+   amendment 2.
    - Whenever *due* is true and no refresh timer is armed, the engine arms it for `REFRESH_MS`: after
      any failed `sync` (boundary, main loop or heartbeat), and when an implementer or reviewer call
      starts. So a long call gets heartbeat attempts even when the `sync` before it failed.
    - At most one lock-refresh `sync` is in progress at a time. A boundary refresh or a timer firing
      while one is in progress waits for it and then checks *due* again, instead of starting another.
+   - A `sync` counts as in progress only once its helper call is made: at once when the serialised
+     helper path is idle, otherwise when its turn comes. A `sync` still waiting behind other helper calls
+     (such as `worktree`) is not in progress, so two tasks that start together while due and whose
+     boundary refreshes queue behind those calls can each send one `sync` for the same boundary. This is
+     allowed: the helper path runs them one after the other, never at once, and a lock refresh is
+     idempotent. The engine does not de-duplicate further.
    - **Tests**, added to `plugins/tasks-ledger/tests/tasks-engine-timer-rev11.test.mjs`:
      - the `sync` before the implementer answers `ok: false`, and the implementer runs 35 mocked minutes:
        at least 3 `sync` calls happen during that call;
      - the timer fires while no task agent is running (a fake `verify` advances the timers by 11
-       minutes): a `sync` happens right before the reviewer starts;
-     - two tasks reach a boundary together while due: exactly one `sync` is sent for that boundary.
+       minutes): no `sync` is sent while only `verify` runs, and a `sync` happens right before the
+       reviewer starts. The test fails when both task-agent checks of the heartbeat path (the timer
+       callback's and the heartbeat's own) are removed;
+     - two tasks reach a boundary together while due, with no helper call queued ahead of their
+       refreshes: exactly one `sync` is sent for that boundary.
