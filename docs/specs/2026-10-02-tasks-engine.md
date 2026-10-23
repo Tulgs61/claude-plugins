@@ -6,8 +6,8 @@ component: tasks-engine
 
 **Scope:** `plugins/tasks-ledger/workflows/tasks-engine.js`.
 
-**Tests:** `plugins/tasks-ledger/tests/tasks-engine.test.mjs` (`eng`) and `tasks-git-prepare.test.mjs`
-(`prep`).
+**Tests:** `plugins/tasks-ledger/tests/tasks-engine.test.mjs` (`eng`), `tasks-git-prepare.test.mjs`
+(`prep`) and `tasks-engine-relay-rev12.test.mjs` (`rel`).
 
 **Helper commands** are defined in `2026-10-02-tasks-git.md`, called "the helper spec"
 below.
@@ -37,6 +37,8 @@ The workflow has no file access, so every side effect is delegated to the helper
   does, its name is `tasks-engine`, so the workflow keeps the name the tasks skill uses.
 - **Glob-overlap block.** The file contains the glob-overlap block from the helper spec, identical to
   the helper's copy (prep:15-22). Scheduling uses its `globListsOverlap`.
+- **Relay-check block.** The file contains the relay-check block from the helper spec, identical to
+  the helper's copy. The engine uses its `relayCheck` to check every helper answer.
 
 ### Runtime calls
 
@@ -141,7 +143,20 @@ from.
 - **Ordering.** The ledger records `verified` before the helper's `merge` runs. The reviewer starts
   only after the helper's `verify` passed. The implementer works only inside the task's worktree that
   the helper made.
-- **Dispatchability.** A task missing `budget` or `proof` is blocked and no agent is started for it.
+- **Dispatch record.** The `tasks` listings of `prepare` and `sync` carry only scheduling fields.
+  Right before a task that is not `verified` is dispatched, and before its worktree is made, the
+  engine fetches the task's full record with the helper's `task <id>` (rel:143-160). That record,
+  not the listing, supplies the title, acceptance, proof, budget, constraints and files in the
+  implementer and reviewer prompts, and decides the checks below.
+  - A failed `task` call, or a record whose `id` is not the task's own, blocks the task with
+    `could not read the task record: <error>` (for the second case the error is
+    `the helper returned no record for <id>`), and no agent starts (rel:193-203).
+  - A record with `needsAcceptance: true`, or without a non-blank `acceptance` and lacking a
+    non-blank `proof` or `budget`, sets the task aside with the reason `needs acceptance`, as rev 10,
+    amendment 14 describes; it does not count as the run's first failure (rel:181-191).
+- **Dispatchability.** A task whose record lacks a non-blank `budget` or `proof` is blocked with
+  `not dispatchable: the task has no proof or no budget`, and no worktree is made and no agent is
+  started for it (rel:162-179).
 
 ### Agent prompts
 
@@ -180,22 +195,47 @@ from.
   parts are the subcommand, the ledger path and, where present, the task id, in that order
   (eng:126-128, eng:158).
 
-**Outcome of a helper call.** `stdout` holds the helper's unmodified stdout from one foreground run
-of exactly that command.
+**Ops prompt.** Besides the command line, the prompt tells the ops agent to answer with `stdout` set
+to the complete standard output of that one run, copied verbatim, character for character, however
+long it is: not to summarise, shorten, abridge or truncate it, not to reformat, pretty-print,
+re-indent or reorder it, not to drop, rename or add any field, and not to add comments. It names the
+check the line ends with (`len` and `sum`) and says that the workflow rejects a copy that differs
+and runs the command again (rel:205-222). The `stdout` field of the ops schema asks for the same
+verbatim copy.
 
-**Helper-call contract.** Each command's answer is the last line of `stdout` that is a JSON object,
-and an `ok: false` answer is final; only a missing answer or a `null` agent result lets the identical
-command be repeated, a bounded number of times; and no two commands that change ledger or git state
-ever run at the same time (`verify` changes neither and may overlap with others).
+**Outcome of a helper call.** `stdout` holds a verbatim copy of the helper's stdout from one
+foreground run of exactly that command.
+
+**Relay check.** The engine checks every relayed answer with the relay check of the helper spec: it
+takes the answer object, removes `len` and `sum`, and recomputes both over the rest with
+`relayCheck`.
+- The answer counts only when `len` is a number, `sum` a string, and both equal the recomputed
+  values. The engine then uses the answer without the two check fields.
+- A copy that differs only in whitespace or in lines around the answer line passes (rel:134-141).
+  A missing check, a check field of the wrong type, a changed value, a dropped field or reordered
+  keys fail it (rel:85-132).
+- An answer that fails its check is a failed attempt, never an answer, also when it says
+  `ok: false`. The engine logs `helper answer failed its check (<command>, attempt <n> of 3)`.
+
+**Helper-call contract.** Each command's answer is the last line of `stdout` that is a JSON object
+and passes the relay check, and such an `ok: false` answer is final. A missing answer, a `null` agent
+result or an answer that fails its check lets the identical command be repeated, up to 3 attempts in
+all. When no attempt gave a checked answer, the call fails with
+`helper answer was altered in transit: <k> of 3 relayed answers to <command> failed their check` if
+any attempt failed its check, otherwise with `no answer from the helper after 3 attempts`
+(rel:64-83, rel:96-111). No two commands that change ledger or git state ever run at the same time
+(`verify` changes neither and may overlap with others).
 
 **Fields relied on** (all others optional, because the fake helper omits them; eng:126-142):
 
 | Command | Fields |
 |---|---|
+| any command | `len`, `sum` (the relay check; never optional) |
 | any command, on failure | `error` |
 | `merge` | `ok`, `sha` |
 | `prepare` | `ok`, `integration`, `prs`, `start`, `tasks` |
 | `sync` | `ok`, `tasks` |
+| `task` | `ok`, `task` (with `id`) |
 | `verify` | `ok`, `tail` |
 | `worktree` | `ok`, `base`, `branch`, `worktree` |
 
@@ -218,6 +258,10 @@ ever run at the same time (`verify` changes neither and may overlap with others)
 - The glob-overlap block and its byte identity with the helper (eng:14-27, prep:15-22).
 - `TASK: <id>` and how typed and untyped calls are recognised (eng:143-157).
 - The ops command line format (eng:126-128, eng:158).
+- The relay check on every helper answer, the retry and the `helper answer was altered in transit`
+  error (rel:64-141).
+- The ops prompt's verbatim-copy wording and that it names the check (rel:205-222).
+- The `task` fetch before `worktree`, and the record feeding both prompts (rel:143-160).
 - The default agent types (eng:191-192).
 - `args.<key> must match`, thrown with zero agent calls (eng:218).
 - The reviewer result shape (eng:156).
@@ -230,7 +274,9 @@ Entries are sorted alphabetically, ignoring case and leading punctuation.
 
 ```text
 // BEGIN glob-overlap
+// BEGIN relay-check
 // END glob-overlap
+// END relay-check
 ^[A-Za-z0-9:_-]+$
 acceptance_met
 agent
@@ -244,18 +290,24 @@ evidence
 findings
 globListsOverlap
 globsOverlap
+helper answer failed its check
+helper answer was altered in transit
 implementerAgent
 integration
 ledger
+len
 locked
 log
 merged
 message
 meta
+needs acceptance
 needs_input
+not dispatchable
 phase
 PROOF
 rejected
+relayCheck
 results
 reviewerAgent
 runId
@@ -264,7 +316,9 @@ scope_ok
 script
 stdout
 stopped
+sum
 takeover
+task
 TASK:
 tasks-engine
 tasks-ledger:reviewer
@@ -284,7 +338,7 @@ These amendments take precedence over the sections above where they differ.
    blocks the task with a one-line reason. Values that must pass: `abc123`, `main`, `origin/main`,
    `task/t/T1`, `/tmp/wt-T1`, `<root>/.claude/worktrees/<topic>-T1`.
 2. **Quoting in the reviewer prompt.** Every value inserted into a git command of the reviewer prompt
-   is quoted. The pinned ops prompt keeps its exact form.
+   is quoted. The command line of the ops prompt keeps its form.
 3. **Consistent review.** A task is merged only when all three review booleans are true and no
    finding has severity `high`. Otherwise the task is blocked with the reason `review inconsistent`.
 4. **`stopped` text.** `result.stopped` is always a single line: whitespace runs collapse to one
@@ -305,8 +359,8 @@ These amendments take precedence over the sections above where they differ.
 
 1. **Run id on `sync`.** Every `sync` call the engine makes carries the run's own run id as its
    argument, so the helper refreshes the lock only while it still names this run (tasks-git rev 5,
-   amendment 2). The ops prompt keeps its pinned form, with the run id as the one argument after
-   `sync`.
+   amendment 2). The command line of the ops prompt keeps its form, with the run id as the one
+   argument after `sync`.
 
 ## Amendments (rev 7)
 
@@ -315,7 +369,8 @@ These amendments take precedence over the sections above where they differ.
    (`todo` or `verified`) is blocked with a one-line reason, and `stopped` names the invalid `start`,
    even when there is no task to drive. This replaces the per-task check of rev 5, amendment 1.
 2. **Run id on `finish`.** The engine passes its run id as the last argument of `finish`, so the
-   helper removes only this run's lock (tasks-git rev 7). The ops prompt keeps its pinned form.
+   helper removes only this run's lock (tasks-git rev 7). The command line of the ops prompt keeps its
+   form.
 
 ## Amendments (rev 10)
 
@@ -353,8 +408,8 @@ refusal of invalid task ids).
 8. **Named takeover.** When `args.takeover` is a string matching the helper's run-id rule, the engine
    calls `prepare <runId> takeover <args.takeover>`. Any other truthy value calls `prepare <runId>
    takeover` as before. A string that does not match the run-id rule throws before any agent runs,
-   with `args.takeover must match`. The ops prompt keeps its pinned form, with the extra argument
-   after `takeover`.
+   with `args.takeover must match`. The command line of the ops prompt keeps its form, with the extra
+   argument after `takeover`.
 9. **Tests**, in new test files, each able to fail before the change:
    - failure paths: helper refusal on `worktree`, `verify`, `merge` and `status`, an implementer that
      never finishes, a thrown exception, each giving a blocked task with a note;
