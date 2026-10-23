@@ -419,9 +419,10 @@ const QUOTED_BACKSLASH = /\\(?=[\\']|$)/;
 // higher-priority one empty; for the ~/.claude default, CLAUDE_CONFIG_DIR is the absolute <home>/.claude this
 // process resolved), so it records into that store whatever the terminal exports and whatever its HOME is. A
 // store whose location is not an absolute path is unavailable and gets no command.
-// Every path in it is shell-quoted, so pasting it into a POSIX shell runs nothing but node on the consent
-// script. A path with control characters, or (outside Windows) with a backslash that shells quote
-// differently (QUOTED_BACKSLASH), is not offered as a command at all, and the request names which path it is.
+// Every path in it is shell-quoted, so pasting it into a POSIX shell (on Windows: PowerShell, with the
+// PowerShell quoting of the consent script) runs nothing but node on the consent script. A path with control
+// characters, or (outside Windows) with a backslash that shells quote differently (QUOTED_BACKSLASH), is not
+// offered as a command at all, and the request names which path it is.
 function approvalRequest(dir) {
   const consent = require(CONSENT_SCRIPT);
   const text = `verify-gate: ${consent.shownPath(path.join(dir, VERIFY_REL))} was not run because this command ` +
@@ -452,12 +453,22 @@ function approvalRequest(dir) {
     return `${text}The path of ${naming(backslash)} contains a backslash, which shells quote differently, so no ` +
       'approve command is offered; move or rename it, then approve the check with scripts/verify-consent.js in a terminal.';
   }
+  if (!POSIX) {
+    // PowerShell: `$env:` assignments, then node, each value in PowerShell single quotes. An assignment of
+    // '' removes the variable. The assignments are statements, so they stay set in that window.
+    const q = consent.powerShellQuote;
+    const assign = store.name === 'CLAUDE_PLUGIN_DATA'
+      ? `$env:CLAUDE_PLUGIN_DATA=${q(store.value)}; `
+      : `$env:CLAUDE_PLUGIN_DATA=''; $env:CLAUDE_CONFIG_DIR=${q(store.value)}; `;
+    return `${text}To approve it, run this yourself in PowerShell in a console window (it must be run in a ` +
+      'console window; the $env: assignments stay set in that PowerShell window): ' +
+      `${assign}node ${q(CONSENT_SCRIPT)} approve ${q(dir)}`;
+  }
   const assign = store.name === 'CLAUDE_PLUGIN_DATA'
     ? `CLAUDE_PLUGIN_DATA=${shellQuote(store.value)} `
     : `CLAUDE_PLUGIN_DATA= CLAUDE_CONFIG_DIR=${shellQuote(store.value)} `;
-  const shell = POSIX ? ', in a POSIX shell such as bash or zsh' : '';
-  return `${text}To approve it, run this yourself${shell} in a terminal (it must be run in a terminal): ` +
-    `${assign}node ${shellQuote(CONSENT_SCRIPT)} approve ${shellQuote(dir)}`;
+  return `${text}To approve it, run this yourself, in a POSIX shell such as bash or zsh in a terminal (it must be ` +
+    `run in a terminal): ${assign}node ${shellQuote(CONSENT_SCRIPT)} approve ${shellQuote(dir)}`;
 }
 
 // One line of compact JSON whose only key is systemMessage; the value never holds a line break.
