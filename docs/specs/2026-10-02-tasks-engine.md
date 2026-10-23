@@ -7,7 +7,8 @@ component: tasks-engine
 **Scope:** `plugins/tasks-ledger/workflows/tasks-engine.js`.
 
 **Tests:** `plugins/tasks-ledger/tests/tasks-engine.test.mjs` (`eng`), `tasks-git-prepare.test.mjs`
-(`prep`) and `tasks-engine-relay-rev12.test.mjs` (`rel`).
+(`prep`), `tasks-engine-relay-rev12.test.mjs` (`rel`) and `tasks-engine-relay-rev13.test.mjs`
+(`rel13`).
 
 **Helper commands** are defined in `2026-10-02-tasks-git.md`, called "the helper spec"
 below.
@@ -145,18 +146,23 @@ from.
   the helper made.
 - **Dispatch record.** The `tasks` listings of `prepare` and `sync` carry only scheduling fields.
   Right before a task that is not `verified` is dispatched, and before its worktree is made, the
-  engine fetches the task's full record with the helper's `task <id>` (rel:143-160). That record,
+  engine fetches the task's full record with the helper's `task <id>` (rel:104-121). That record,
   not the listing, supplies the title, acceptance, proof, budget, constraints and files in the
   implementer and reviewer prompts, and decides the checks below.
   - A failed `task` call, or a record whose `id` is not the task's own, blocks the task with
     `could not read the task record: <error>` (for the second case the error is
-    `the helper returned no record for <id>`), and no agent starts (rel:193-203).
+    `the helper returned no record for <id>`), and no agent starts (rel:154-164).
   - A record with `needsAcceptance: true`, or without a non-blank `acceptance` and lacking a
     non-blank `proof` or `budget`, sets the task aside with the reason `needs acceptance`, as rev 10,
-    amendment 14 describes; it does not count as the run's first failure (rel:181-191).
+    amendment 14 describes; it does not count as the run's first failure (rel:142-152).
 - **Dispatchability.** A task whose record lacks a non-blank `budget` or `proof` is blocked with
   `not dispatchable: the task has no proof or no budget`, and no worktree is made and no agent is
-  started for it (rel:162-179).
+  started for it (rel:123-140).
+- **Started line.** Once the record is fetched, and before the needs-acceptance and dispatchability
+  checks, the engine logs `<id> started: <title>`, with the record's title trimmed (rel13:59-70); the
+  listing that scheduled the task has no title. A task whose record cannot be read gets no started
+  line (rel13:72-79). A task resumed as `verified` fetches no record and logs
+  `<id> started: verified in an earlier run, merging` before its `merge` (rel13:81-87).
 
 ### Agent prompts
 
@@ -200,7 +206,7 @@ to the complete standard output of that one run, copied verbatim, character for 
 long it is: not to summarise, shorten, abridge or truncate it, not to reformat, pretty-print,
 re-indent or reorder it, not to drop, rename or add any field, and not to add comments. It names the
 check the line ends with (`len` and `sum`) and says that the workflow rejects a copy that differs
-and runs the command again (rel:205-222). The `stdout` field of the ops schema asks for the same
+and runs the command again (rel:166-183). The `stdout` field of the ops schema asks for the same
 verbatim copy.
 
 **Outcome of a helper call.** `stdout` holds a verbatim copy of the helper's stdout from one
@@ -211,19 +217,23 @@ takes the answer object, removes `len` and `sum`, and recomputes both over the r
 `relayCheck`.
 - The answer counts only when `len` is a number, `sum` a string, and both equal the recomputed
   values. The engine then uses the answer without the two check fields.
-- A copy that differs only in whitespace or in lines around the answer line passes (rel:134-141).
+- A copy that differs only in whitespace or in lines around the answer line passes (rel:95-102).
   A missing check, a check field of the wrong type, a changed value, a dropped field or reordered
-  keys fail it (rel:85-132).
+  keys fail it (rel:46-93).
 - An answer that fails its check is a failed attempt, never an answer, also when it says
   `ok: false`. The engine logs `helper answer failed its check (<command>, attempt <n> of 3)`.
 
 **Helper-call contract.** Each command's answer is the last line of `stdout` that is a JSON object
-and passes the relay check, and such an `ok: false` answer is final. A missing answer, a `null` agent
+and passes the relay check, and such an `ok: false` answer is final. The engine scans `stdout` upward
+from its last line and skips every line that is not a JSON object or fails the check, so a JSON line
+the relay appended after a correctly sealed answer, or an altered copy below it, costs no attempt
+(rel13:14-42). An attempt fails its check only when `stdout` holds at least one JSON object line and
+none of them passes (rel13:44-57). A missing answer, a `null` agent
 result or an answer that fails its check lets the identical command be repeated, up to 3 attempts in
 all. When no attempt gave a checked answer, the call fails with
 `helper answer was altered in transit: <k> of 3 relayed answers to <command> failed their check` if
 any attempt failed its check, otherwise with `no answer from the helper after 3 attempts`
-(rel:64-83, rel:96-111). No two commands that change ledger or git state ever run at the same time
+(rel:25-44, rel:57-72). No two commands that change ledger or git state ever run at the same time
 (`verify` changes neither and may overlap with others).
 
 **Fields relied on** (all others optional, because the fake helper omits them; eng:126-142):
@@ -259,9 +269,12 @@ any attempt failed its check, otherwise with `no answer from the helper after 3 
 - `TASK: <id>` and how typed and untyped calls are recognised (eng:143-157).
 - The ops command line format (eng:126-128, eng:158).
 - The relay check on every helper answer, the retry and the `helper answer was altered in transit`
-  error (rel:64-141).
-- The ops prompt's verbatim-copy wording and that it names the check (rel:205-222).
-- The `task` fetch before `worktree`, and the record feeding both prompts (rel:143-160).
+  error (rel:25-102).
+- The ops prompt's verbatim-copy wording and that it names the check (rel:166-183).
+- The `task` fetch before `worktree`, and the record feeding both prompts (rel:104-121).
+- The upward scan for the last JSON line whose check holds (rel13:14-57).
+- The `<id> started: <title>` line after the record fetch, and the resumed `verified` variant
+  (rel13:59-87).
 - The default agent types (eng:191-192).
 - `args.<key> must match`, thrown with zero agent calls (eng:218).
 - The reviewer result shape (eng:156).
@@ -538,15 +551,25 @@ These amendments take precedence over every earlier section and amendment where 
        The assertions of the two amendment 14 tests stay as they are.
      No other kept test file changes. `tasks-engine.test.mjs` uses a real `setTimeout` only inside its
      fake agent and keeps passing because no timer outlives the run (amendment 3).
-6. **A due refresh always has a timer, and refreshes are never doubled.** This sharpens amendment 2.
+6. **A due refresh always has a timer, and a refresh in progress is never doubled.** This sharpens
+   amendment 2.
    - Whenever *due* is true and no refresh timer is armed, the engine arms it for `REFRESH_MS`: after
      any failed `sync` (boundary, main loop or heartbeat), and when an implementer or reviewer call
      starts. So a long call gets heartbeat attempts even when the `sync` before it failed.
    - At most one lock-refresh `sync` is in progress at a time. A boundary refresh or a timer firing
      while one is in progress waits for it and then checks *due* again, instead of starting another.
+   - A `sync` counts as in progress only once its helper call is made: at once when the serialised
+     helper path is idle, otherwise when its turn comes. A `sync` still waiting behind other helper calls
+     (such as `worktree`) is not in progress, so two tasks that start together while due and whose
+     boundary refreshes queue behind those calls can each send one `sync` for the same boundary. This is
+     allowed: the helper path runs them one after the other, never at once, and a lock refresh is
+     idempotent. The engine does not de-duplicate further.
    - **Tests**, added to `plugins/tasks-ledger/tests/tasks-engine-timer-rev11.test.mjs`:
      - the `sync` before the implementer answers `ok: false`, and the implementer runs 35 mocked minutes:
        at least 3 `sync` calls happen during that call;
      - the timer fires while no task agent is running (a fake `verify` advances the timers by 11
-       minutes): a `sync` happens right before the reviewer starts;
-     - two tasks reach a boundary together while due: exactly one `sync` is sent for that boundary.
+       minutes): no `sync` is sent while only `verify` runs, and a `sync` happens right before the
+       reviewer starts. The test fails when both task-agent checks of the heartbeat path (the timer
+       callback's and the heartbeat's own) are removed;
+     - two tasks reach a boundary together while due, with no helper call queued ahead of their
+       refreshes: exactly one `sync` is sent for that boundary.

@@ -111,7 +111,7 @@ clear and count each other's state. The state is kept per session and project, i
 |---|---|---|
 | `PreToolUse` on `Agent` | [`dispatch-guard.js`](hooks/dispatch-guard.js) | Blocks (exit 2) an Agent call to `implementer` or `task-implementer` (any plugin prefix) whose prompt has no `PROOF` or no `BUDGET` section, and points at the dispatch skill. Other agents pass. |
 | `PostToolUse` on `Edit\|Write\|MultiEdit\|NotebookEdit` | [`verify-gate.js`](hooks/verify-gate.js) | Marks the edited file's project (its repository or worktree root) dirty for this session. |
-| `Stop`, `SubagentStop` | [`verify-gate.js`](hooks/verify-gate.js) | If the stopping session's or subagent's project is dirty, looks for `.claude/verify.cmd`: inside a repository from the working directory upward to the nearest directory that contains `.git` (the repository or worktree root) inclusive, nearest file wins; outside any repository only `<cwd>/.claude/verify.cmd`. On POSIX a `verify.cmd` not owned by the current user or group/world-writable is skipped, with a one-time warning. An unapproved command is skipped and the approve command is shown once (see [verify consent](../../README.md#the-claudeverifycmd-opt-in)). Runs an approved one with bash in the directory where it was found, in its own process group, with a 3-minute timeout after which the whole group is ended (on Windows only the direct child). On failure it blocks that stop (exit 2) and hands Claude the output tail. It blocks once per stop chain: a stop that follows a block (`stop_hook_active`) is allowed without re-running the check. After 3 failed runs without a new edit it stops blocking and only warns. Does nothing without the file. It follows the hook input's `cwd` and ignores `CLAUDE_PROJECT_DIR`. |
+| `Stop`, `SubagentStop` | [`verify-gate.js`](hooks/verify-gate.js) | If the stopping session's or subagent's project is dirty, looks for `.claude/verify.cmd`: inside a repository from the working directory upward to the nearest directory that contains `.git` (the repository or worktree root) inclusive, nearest file wins; outside any repository only `<cwd>/.claude/verify.cmd`. On POSIX a `verify.cmd` not owned by the current user or group/world-writable is skipped, with a one-time warning. An unapproved command is skipped and the approve command is shown once per check directory in each session (see [verify consent](../../README.md#the-claudeverifycmd-opt-in)). Runs an approved one with bash in the directory where it was found, in its own process group, with a 3-minute timeout after which the whole group is ended (on Windows only the direct child). On failure it blocks that stop (exit 2) and hands Claude the output tail. It blocks once per stop chain: a stop that follows a block (`stop_hook_active`) is allowed without re-running the check. After 3 failed runs without a new edit it stops blocking and only warns. Does nothing without the file. It follows the hook input's `cwd` and ignores `CLAUDE_PROJECT_DIR`. |
 
 ## Files
 
@@ -141,13 +141,17 @@ tests/                       node:test suites
 - **Consent.** An approval covers one check directory: the directory that contains `.claude/`, relative to
   the top level of its checkout (linked worktrees share the main checkout's approvals). The approve command
   the gate prints pins the store it reads (for the `~/.claude` default, `CLAUDE_PLUGIN_DATA=` and
-  `CLAUDE_CONFIG_DIR='<home>/.claude'`), so it records there whatever your terminal exports. It is for a
-  POSIX shell such as bash or zsh; a path with a backslash that shells quote differently inside single
-  quotes (before another backslash or a single quote, or at the end), or with a control character, gets no
-  command. Native Windows still cannot record an approval. The store's location (`CLAUDE_PLUGIN_DATA`,
-  else `CLAUDE_CONFIG_DIR`, else your home directory) must be an absolute path; otherwise no approval
-  applies, no command is offered, and `approve`, `revoke` and `list` change nothing and exit 2. See
-  [verify consent](../../README.md#the-claudeverifycmd-opt-in).
+  `CLAUDE_CONFIG_DIR='<home>/.claude'`), so it records there whatever your terminal exports. Outside
+  Windows it is for a POSIX shell such as bash or zsh; a path with a backslash that shells quote
+  differently inside single quotes (before another backslash or a single quote, or at the end), or with a
+  control character, gets no command. On native Windows `approve` asks in the console window it runs in
+  (it writes to `CONOUT$` and reads the answer from `CONIN$`; without a console it exits 2 at once), and
+  the command is for PowerShell: `$env:` assignments, then `node`, every value in single quotes with every
+  single-quote character doubled (also `‘` and `’`). Those `$env:` assignments stay set in that PowerShell
+  window. The store's location (`CLAUDE_PLUGIN_DATA`, else `CLAUDE_CONFIG_DIR`, else your home directory)
+  must be an absolute path (on Windows a fully qualified one: a drive letter followed by `\` or `/`, or a
+  UNC path); otherwise no approval applies, no command is offered, and `approve`, `revoke` and `list`
+  change nothing and exit 2. See [verify consent](../../README.md#the-claudeverifycmd-opt-in).
 - **Nothing is pushed by default.** [`scripts/tasks-git.js`](scripts/tasks-git.js) pushes only when the
   ledger has `prs: true` (set only when you asked for PRs), and then only `task/<topic>/*` branches —
   never `task/<topic>/integration`, never a permanent branch. It opens draft PRs and never merges them.

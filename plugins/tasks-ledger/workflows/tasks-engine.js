@@ -156,19 +156,28 @@ function checkedPayload(value) {
   return check.len === len && check.sum === sum ? payload : null;
 }
 
-function lastJsonObject(stdout) {
+// The answer in a relayed `stdout`: the last line that is a JSON object and whose check holds,
+// scanning upward, so a line the relay appended after the sealed answer costs no attempt. Returns
+// { payload } for a checked answer, { altered: true } when JSON object lines were found but none
+// passed its check, or null when there was no JSON object line at all.
+function checkedAnswer(stdout) {
   const lines = String(stdout == null ? '' : stdout).split(/\r?\n/);
+  let altered = false;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim();
     if (!line.startsWith('{')) continue;
+    let value;
     try {
-      const value = JSON.parse(line);
-      if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+      value = JSON.parse(line);
     } catch {
-      // not JSON; keep looking further up
+      continue; // not JSON; keep looking further up
     }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const payload = checkedPayload(value);
+    if (payload) return { payload };
+    altered = true;
   }
-  return null;
+  return altered ? { altered: true } : null;
 }
 
 let opsChain = Promise.resolve();
@@ -201,10 +210,9 @@ async function runOps(command) {
     }
     if (result != null) {
       const stdout = typeof result === 'string' ? result : result.stdout;
-      const answer = lastJsonObject(stdout);
+      const answer = checkedAnswer(stdout);
       if (answer) {
-        const payload = checkedPayload(answer);
-        if (payload) return payload; // an `ok: false` answer is final
+        if (answer.payload) return answer.payload; // an `ok: false` answer is final
         altered++;
         log(`helper answer failed its check (${name}, attempt ${attempt} of ${OPS_ATTEMPTS})`);
       }
@@ -503,12 +511,17 @@ async function fetchRecord(t) {
 }
 
 async function driveTask(t) {
-  if (t.status === 'verified') return merge(t); // resumed: reviewed in an earlier run
+  if (t.status === 'verified') {
+    // resumed: reviewed in an earlier run, so no record is fetched and no agent starts
+    log(`${t.id} started: verified in an earlier run, merging`);
+    return merge(t);
+  }
 
   const fetched = await fetchRecord(t);
   if (fetched.error) return block(t, `could not read the task record: ${fetched.error}`);
   // The record decides what the agents are told; the summary only scheduled the task.
   const r = { ...fetched.record, id: t.id };
+  log(`${t.id} started: ${text(r.title)}`);
   if (r.needsAcceptance === true || (!text(r.acceptance) && (!text(r.proof) || !text(r.budget)))) {
     setAsideLate(t, 'needs acceptance');
     return block(t, 'needs acceptance', false);
@@ -570,8 +583,9 @@ function ready(t) {
   return true;
 }
 
+// The `started` line, with the task's title, is logged by driveTask once the record is fetched; the
+// scheduling summary carries no title.
 function start(t) {
-  log(`${t.id} started`);
   const promise = driveTask(t)
     .catch(error => block(t, `unexpected error: ${(error && error.message) || error}`))
     .catch(error => finishTask(t, 'blocked', `unexpected error: ${(error && error.message) || error}`))

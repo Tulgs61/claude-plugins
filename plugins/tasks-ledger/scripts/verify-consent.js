@@ -3,16 +3,17 @@
 // command was approved for that repository, and only a person at a terminal (or a change to the store
 // itself) can approve it. The gate never records consent.
 //   approve <dir>  shows <dir>/.claude/verify.cmd (invisible characters escaped, with its line count and
-//                  hash) on stdout and on the controlling terminal (/dev/tty, never stdin), then asks there;
-//                  only the answer `yes` records it. Without a terminal: nothing on stdout, exit 2,
+//                  hash) on stdout and on the controlling terminal (/dev/tty, never stdin; on Windows the
+//                  console, written through CONOUT$ and read from CONIN$), then asks there; only the
+//                  answer `yes` records it. Without a terminal or console: nothing on stdout, exit 2,
 //                  `needs a terminal` on stderr.
 //   revoke <dir>   removes every entry for the repository of <dir>, whatever its check directory.
 // approve and revoke never replace an existing store they cannot use; they exit 2 and say why.
 //   list           prints one line per entry: repository identity, the first 12 hex digits of the hash and,
 //                  for a check below the top level, the check directory.
 // The store is $CLAUDE_PLUGIN_DATA/verify-consent.json, or <config>/tasks-ledger/verify-consent.json where
-// <config> is $CLAUDE_CONFIG_DIR or ~/.claude. When the value that selects it is not an absolute path, the
-// store is unavailable: approve, revoke and list change nothing and exit 2. An entry is (repository identity, check directory, sha256 of
+// <config> is $CLAUDE_CONFIG_DIR or ~/.claude. When the value that selects it is not an absolute path (on
+// Windows, not a fully qualified one), the store is unavailable: approve, revoke and list change nothing and exit 2. An entry is (repository identity, check directory, sha256 of
 // the command); the check directory is the directory containing .claude/, relative to the checkout's top
 // level, and is stored as `dir` only when it is not the top level itself.
 // verify-gate loads this file as a module for the store rules. The answer can only be supplied through
@@ -45,29 +46,40 @@ function currentUid() {
 // assignment that chose it: { file, name, value } with name CLAUDE_PLUGIN_DATA or CLAUDE_CONFIG_DIR and
 // its value, or name null for the ~/.claude default, whose value is <home>/.claude (the CLAUDE_CONFIG_DIR
 // that selects the same file) and whose `home` is the home directory this process resolved. The value that
-// selects the store must be an absolute path; it is never resolved against the working directory, so a file
-// inside a repository can never act as the store. Otherwise the store is unavailable: `file` is null and
-// `unavailable` says why, naming the variable or the home directory.
-function storeSelection(env = process.env) {
+// selects the store must be an absolute path (on Windows a fully qualified one, see isFullyQualified); it is
+// never resolved against the working directory, so a file inside a repository can never act as the store.
+// Otherwise the store is unavailable: `file` is null and `unavailable` says why, naming the variable or the
+// home directory. `platform` selects the path rules; it is the running platform except in tests.
+function storeSelection(env = process.env, platform = process.platform) {
+  const p = platform === 'win32' ? path.win32 : path.posix;
   let sel;
   if (env.CLAUDE_PLUGIN_DATA) {
     const value = env.CLAUDE_PLUGIN_DATA;
-    sel = { file: path.join(value, STORE_NAME), name: 'CLAUDE_PLUGIN_DATA', value, origin: 'CLAUDE_PLUGIN_DATA', given: value };
+    sel = { file: p.join(value, STORE_NAME), name: 'CLAUDE_PLUGIN_DATA', value, origin: 'CLAUDE_PLUGIN_DATA', given: value };
   } else if (env.CLAUDE_CONFIG_DIR) {
     const value = env.CLAUDE_CONFIG_DIR;
-    sel = { file: path.join(value, 'tasks-ledger', STORE_NAME), name: 'CLAUDE_CONFIG_DIR', value, origin: 'CLAUDE_CONFIG_DIR', given: value };
+    sel = { file: p.join(value, 'tasks-ledger', STORE_NAME), name: 'CLAUDE_CONFIG_DIR', value, origin: 'CLAUDE_CONFIG_DIR', given: value };
   } else {
     const home = os.homedir();
-    const value = path.join(home, '.claude');
-    sel = { file: path.join(value, 'tasks-ledger', STORE_NAME), name: null, value, home, origin: 'the home directory', given: home };
+    const value = p.join(home, '.claude');
+    sel = { file: p.join(value, 'tasks-ledger', STORE_NAME), name: null, value, home, origin: 'the home directory', given: home };
   }
-  if (!path.isAbsolute(sel.given)) {
+  if (!isFullyQualified(sel.given, platform)) {
     const unavailable = `the consent store's location is not an absolute path (${sel.origin} is ${shownPath(sel.given)}), ` +
       'so the consent store is unavailable';
     return { ...sel, file: null, unavailable };
   }
   // Both are absolute here, so resolving only normalises them.
-  return { ...sel, file: path.resolve(sel.file), value: path.resolve(sel.value) };
+  return { ...sel, file: p.resolve(sel.file), value: p.resolve(sel.value) };
+}
+
+// Whether `p` names one location whatever the working directory is. On Windows only a drive letter followed
+// by a separator (`C:\x`, `C:/x`) or a UNC or device path (`\\server\share`, `\\?\C:\x`) does: `\x` and `/x`
+// are rooted on the current drive and `C:x` is relative to that drive's working directory, although
+// path.isAbsolute accepts the first two. Elsewhere it is path.isAbsolute.
+function isFullyQualified(p, platform = process.platform) {
+  if (platform !== 'win32') return path.posix.isAbsolute(p);
+  return /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/])/.test(p);
 }
 
 // The store file, or null when its location is not an absolute path.
@@ -81,10 +93,11 @@ function storeFile(env = process.env) {
 const CONTROL_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 // Why a check directory below the top level cannot be stored, or null: it must be relative, without a
-// `..` segment or a control character (CONTROL_CHARS).
-function dirProblem(dir) {
+// `..` segment or a control character (CONTROL_CHARS). A segment ends at `/`, and on Windows also at `\`:
+// on POSIX a backslash is an ordinary character of a directory name, so `a\..\b` is one segment.
+function dirProblem(dir, platform = process.platform) {
   if (dir.startsWith('/') || path.isAbsolute(dir) || path.win32.isAbsolute(dir)) return 'it is an absolute path';
-  if (dir.split(/[\\/]/).includes('..')) return 'it contains a .. segment';
+  if (dir.split(platform === 'win32' ? /[\\/]/ : '/').includes('..')) return 'it contains a .. segment';
   if (CONTROL_CHARS.test(dir)) return 'it contains a control character';
   return null;
 }
@@ -409,18 +422,19 @@ function readCheck(dir) {
   }
 }
 
-// The controlling terminal as { write(text), ask(prompt), close() }, or null when there is none (opening
-// /dev/tty fails). Writes are synchronous; ask returns the answer line.
-function openTerminal() {
-  let fd;
-  try {
-    fd = fs.openSync('/dev/tty', 'r+');
-  } catch {
-    return null;
-  }
+// The Windows console's input buffer and active screen buffer, by their device names. A bare `CONIN$` would
+// be resolved against the working directory (\\?\<cwd>\CONIN$) and could open a file there.
+const CONSOLE_IN = '\\\\.\\CONIN$';
+const CONSOLE_OUT = '\\\\.\\CONOUT$';
+
+// A terminal on the descriptors `input` (read) and `output` (write) as { write(text), ask(prompt), close() }.
+// Writes are synchronous; ask returns the answer line, read byte by byte up to a line feed, the end of input
+// or a read error, without a trailing carriage return. `close` closes both descriptors (one when they are the
+// same), the second even when closing the first fails.
+function terminalOn(io, input, output) {
   const write = text => {
     const bytes = Buffer.from(text, 'utf8');
-    for (let off = 0; off < bytes.length;) off += fs.writeSync(fd, bytes, off);
+    for (let off = 0; off < bytes.length;) off += io.writeSync(output, bytes, off);
   };
   return {
     write,
@@ -431,7 +445,7 @@ function openTerminal() {
       for (;;) {
         let n;
         try {
-          n = fs.readSync(fd, one, 0, 1, null);
+          n = io.readSync(input, one, 0, 1, null);
         } catch {
           break;
         }
@@ -441,9 +455,54 @@ function openTerminal() {
       return Buffer.from(bytes).toString('utf8').replace(/\r$/, '');
     },
     close() {
-      fs.closeSync(fd);
+      try {
+        io.closeSync(input);
+      } finally {
+        if (output !== input) io.closeSync(output);
+      }
     },
   };
+}
+
+// The terminal approve asks on, or null when there is none. On POSIX it is the controlling terminal
+// (/dev/tty, opened once for reading and writing). On Windows it is the process's console: the answer is
+// read from CONIN$ and everything is written to CONOUT$. Without a console (or when either cannot be opened)
+// it is null at once, never a wait, and a handle already opened is closed. `platform` and `io` (the fs
+// functions used: openSync, closeSync, readSync, writeSync) are the running platform and node:fs except in
+// tests, which reach them only by loading this file as a module.
+function openTerminal({ platform = process.platform, io = fs } = {}) {
+  if (platform !== 'win32') {
+    let fd;
+    try {
+      fd = io.openSync('/dev/tty', 'r+');
+    } catch {
+      return null;
+    }
+    return terminalOn(io, fd, fd);
+  }
+  let input = null;
+  try {
+    // Opened for reading and writing with OPEN_EXISTING ('w' would ask to create the device).
+    input = io.openSync(CONSOLE_IN, 'r+');
+    const output = io.openSync(CONSOLE_OUT, 'r+');
+    return terminalOn(io, input, output);
+  } catch {
+    if (input !== null) {
+      try {
+        io.closeSync(input);
+      } catch {
+        // Nothing more to release.
+      }
+    }
+    return null;
+  }
+}
+
+// A PowerShell single-quoted string: inside one, PowerShell reads every single-quote character (the ASCII
+// quote and the typographic U+2018, U+2019, U+201A and U+201B) as a quote, and a doubled one as that
+// character, so each is doubled. Nothing else is special inside single quotes.
+function powerShellQuote(text) {
+  return `'${text.replace(/['\u2018\u2019\u201a\u201b]/g, '$&$&')}'`;
 }
 
 // Escapes every character `pattern` matches as \x1b or \u202e (\u{...} beyond the BMP).
@@ -482,7 +541,8 @@ function availableStore(env, err) {
   return null;
 }
 
-// The answer comes only from the terminal that `terminal()` opens (by default the controlling terminal).
+// The answer comes only from the terminal that `terminal()` opens (by default openTerminal(): the
+// controlling terminal, or on Windows the console).
 // The `ask` option is the older form of the same seam: a terminal that only asks, where null means none.
 // The terminal is opened first: without one, approve writes nothing but `needs a terminal` on stderr.
 function approve(dir, { ask, terminal, env = process.env, out = process.stdout, err = process.stderr } = {}) {
@@ -565,7 +625,7 @@ function list({ env = process.env, out = process.stdout, err = process.stderr } 
   return 0;
 }
 
-// The command line never supplies an answer: approve always asks on the terminal.
+// The command line never supplies an answer: approve always asks on the terminal (on Windows the console).
 function main(args) {
   const [cmd, ...rest] = args;
   if (cmd === 'approve' && rest.length === 1) return approve(rest[0]);
@@ -576,7 +636,7 @@ function main(args) {
 }
 
 module.exports = {
-  CONTROL_CHARS, storeSelection, storeFile, readStore, shownPath, findProgram, untrustedDirs, repoIdentity, checkDir, commandHash, isApproved,
+  CONTROL_CHARS, dirProblem, isFullyQualified, storeSelection, storeFile, openTerminal, powerShellQuote, readStore, shownPath, findProgram, untrustedDirs, repoIdentity, checkDir, commandHash, isApproved,
   approve, revoke, list,
 };
 

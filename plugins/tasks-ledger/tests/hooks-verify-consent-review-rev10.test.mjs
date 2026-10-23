@@ -274,7 +274,7 @@ test('amendment 22: a state file owned by another user is not read', { skip: !PO
   const repo = makeRepo('d22-state', 'echo d22-state-ran >&2; exit 1\n');
   approveCheck(env, repo);
   const session = 'rev10-d22-state';
-  const flags = { dirty: true, failures: 2, looseWarned: true, consentAsked: true };
+  const flags = { dirty: true, failures: 2, looseWarned: true, consentAskedDirs: [repo] };
   // An edit by "another user" does not take over the flags or count of a state file it does not own.
   writeFileSync(stateFile(session, repo), JSON.stringify(flags));
   assert.equal(edit(env, session, repo, OTHER_UID).status, 0);
@@ -283,7 +283,7 @@ test('amendment 22: a state file owned by another user is not read', { skip: !PO
   writeFileSync(stateFile(session, repo), JSON.stringify(flags));
   assert.equal(edit(env, session, repo).status, 0);
   assert.deepEqual(JSON.parse(readFileSync(stateFile(session, repo), 'utf8')),
-    { dirty: true, failures: 0, looseWarned: true, consentAsked: true });
+    { dirty: true, failures: 0, looseWarned: true, consentAskedDirs: [repo] });
   // A stop by "another user" does not use the dirty state.
   const r = stop(env, session, repo, OTHER_UID);
   assert.equal(r.status, 0, r.stderr);
