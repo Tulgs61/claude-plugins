@@ -6,49 +6,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ENGINE, task } from './helpers/git-sandbox.mjs';
-import { sealed, summaryOf } from './helpers/relay.mjs';
+import { runEngine, sealed, summaryOf } from './helpers/relay.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const body = readFileSync(ENGINE, 'utf8').replace(/^export\s+/m, '');
-const GOOD_REVIEW = { verdict: 'verified', acceptance_met: true, scope_ok: true, constraints_ok: true, findings: [], evidence: 'ok' };
-
-// Runs the engine against a fake helper. `records` are the ledger tasks: prepare lists their summary
-// and `task <id>` returns the record. `answers` overrides the payload per subcommand (a function of
-// the parts after the ledger path and of the call count). `relay(op, n, line)` turns the sealed
-// answer line of the n-th call of `op` into the stdout the ops agent hands back (default: as is).
-async function runEngine(records, { answers = {}, relay = (_op, _n, line) => line } = {}) {
-  const run = new AsyncFunction('args', 'agent', 'phase', 'log', body);
-  const opsLines = [];
-  const prompts = [];
-  const logs = [];
-  const counts = {};
-  const byId = new Map(records.map(r => [r.id, r]));
-  const canned = {
-    prepare: () => ({ ok: true, start: 'abc123', integration: '/tmp/int', prs: false, tasks: records.map(summaryOf) }),
-    task: id => (byId.has(id) ? { ok: true, task: byId.get(id) } : { ok: false, error: `no task ${id}` }),
-    worktree: id => ({ ok: true, worktree: `/tmp/wt-${id}`, branch: `task/t/${id}`, base: 'main' }),
-    verify: () => ({ ok: true, tail: 'ok' }),
-    merge: () => ({ ok: true, sha: 'def456' }),
-    sync: () => ({ ok: true, tasks: [] }),
-    finish: () => ({ ok: true, runStatus: 'finished', tasks: records.map(summaryOf) }),
-    ...answers,
-  };
-  const agent = async (prompt, options) => {
-    if (options.agentType !== undefined) {
-      prompts.push(prompt);
-      return /^TASK: /.test(prompt) ? 'done' : GOOD_REVIEW;
-    }
-    const line = prompt.match(/node "[^"]*" (.*)\n/)[1];
-    opsLines.push(line);
-    const [op, , ...rest] = line.replace(/"/g, '').split(' ');
-    counts[op] = (counts[op] || 0) + 1;
-    const payload = canned[op] ? canned[op](...rest, counts[op]) : { ok: true };
-    return { stdout: relay(op, counts[op], sealed(payload), payload) };
-  };
-  const args = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId: 'test1' };
-  const result = await run(args, agent, () => {}, message => logs.push(message));
-  return { result, opsLines, prompts, logs, counts };
-}
 
 const statusOf = (result, id) => result.results.filter(r => r.id === id).map(r => r.status);
 const noteOf = (result, id) => result.results.find(r => r.id === id).note;
