@@ -621,3 +621,28 @@ concern verify-gate and `scripts/verify-consent.js`. dispatch-guard is unchanged
      or the dir test file: `approve` in a check directory whose relative path holds U+202E exits 2 and
      records nothing (POSIX only). A probe test, marked as coverage and following the skip and `CI` rules
      of amendment 5, runs `pty-drive.py --probe` 20 times and expects exit 0 every time.
+
+## Amendments (rev 13)
+
+These amendments take precedence over every earlier section and amendment where they differ. They
+concern `scripts/verify-consent.js`. verify-gate and dispatch-guard are unchanged.
+
+1. **A backslash is not a separator in a check directory on POSIX.** Rev 11, amendment 4 refuses a
+   stored `dir` that contains `..` as a segment, and amendment 7 refuses the same check directory on
+   `approve`. A segment ends at `/`. On POSIX that is the only separator: a backslash is an ordinary
+   character of a directory name, so a real directory named `a\..\b` is one segment, `approve` records
+   it as `dir: "a\..\b"`, and a stored entry with that `dir` approves its check. On native Windows `\`
+   ends a segment too, so the same value is refused there.
+   - Unchanged: a `dir` that is absolute (by POSIX or by Windows rules, so one that starts with `\`
+     stays refused on POSIX), empty when present, holds a control character, or has a real `..`
+     segment (`a/../b`, `../x`) is invalid, and `approve` refuses such a check directory with exit 2.
+2. **Tests**, in `plugins/tasks-ledger/tests/hooks-verify-consent-backslash-rev13.test.mjs`. Each must be
+   able to fail on the commit before the change.
+   - POSIX only: `approve` in `<repo>/a\..\b`, answering `yes`, exits 0 and records `dir: "a\..\b"`; the
+     gate then runs that check.
+   - POSIX only: a store entry with `dir: "a\..\b"` approves the check in that directory; entries with
+     `a/../b` or `../x` are still ignored.
+   - On every platform, through the module's `dirProblem(dir, platform)`: with a POSIX platform,
+     `a\..\b` has no problem and `a/../b` and `../x` have a `..` segment; with `win32`, `a\..\b`,
+     `..\x` and `a/../b` all have a `..` segment; absolute paths and control characters are refused
+     for both.
