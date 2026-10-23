@@ -1,6 +1,7 @@
 // Tests for the shell the approval request's command is meant for: it names a POSIX shell, and a quoted
 // path with a backslash that shells read differently inside single quotes (one before another backslash
-// or a single quote, or at the end of the path) gets no command; the request names which path it is.
+// or a single quote, or at the end of the path) gets no command; the request names which path it is. On
+// native Windows (rev 13, amendment 6) the command is for PowerShell, and a backslash keeps it.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -111,4 +112,17 @@ test('a backslash that is not before another backslash or a single quote, nor at
   assert.doesNotMatch(message, /contains a backslash/, message);
   assert.match(message, /POSIX shell such as bash or zsh/);
   assert.ok(message.includes(`node '${CONSENT}' approve '${repo}'`), message);
+});
+
+// Every native Windows path holds backslashes (`C:\...`), and they keep the command.
+test('on Windows the request is a PowerShell command, also for paths with backslashes', { skip: POSIX }, () => {
+  const env = freshEnv();
+  const repo = makeRepo('powershell', 'exit 1\n');
+  assert.ok(repo.includes('\\'), repo);
+  assert.equal(edit(env, 'rev13-powershell', repo).status, 0);
+  const message = messageOf(stop(env, 'rev13-powershell', repo));
+  assert.doesNotMatch(message, /contains a backslash|POSIX shell/, message);
+  assert.match(message, /in PowerShell in a console window/);
+  assert.ok(message.includes('the $env: assignments stay set in that PowerShell window'), message);
+  assert.ok(message.endsWith(`$env:CLAUDE_PLUGIN_DATA='${env.CLAUDE_PLUGIN_DATA}'; node '${CONSENT}' approve '${repo}'`), message);
 });

@@ -88,8 +88,15 @@ function clampFailures(n) {
   return Number.isInteger(n) ? Math.min(Math.max(n, 0), MAX_FAILURES) : 0;
 }
 
-const CLEAN = { dirty: false, failures: 0, looseWarned: false, consentAsked: false };
-const UNREADABLE = { dirty: true, failures: 0, looseWarned: false, consentAsked: false };
+const CLEAN = { dirty: false, failures: 0, looseWarned: false, consentAskedDirs: [] };
+const UNREADABLE = { dirty: true, failures: 0, looseWarned: false, consentAskedDirs: [] };
+
+// The check directories (real paths) whose approval request this session and project already showed.
+// Anything but an array of strings counts as none; the boolean consentAsked of earlier versions did not
+// say which directory it asked about, so it is ignored and that directory is asked about once more.
+function askedDirs(value) {
+  return Array.isArray(value) ? [...new Set(value.filter(d => typeof d === 'string' && d !== ''))] : [];
+}
 
 // The file is gone (or a path component is not a directory), possibly removed since it was inspected.
 function missing(e) {
@@ -123,7 +130,7 @@ function readState(file) {
       dirty: state.dirty === true,
       failures: clampFailures(state.failures),
       looseWarned: state.looseWarned === true,
-      consentAsked: state.consentAsked === true,
+      consentAskedDirs: askedDirs(state.consentAskedDirs),
     };
   } catch {
     return UNREADABLE;
@@ -138,7 +145,8 @@ function readState(file) {
 function writeState(file, state) {
   const data = { dirty: state.dirty, failures: clampFailures(state.failures) };
   if (state.looseWarned) data.looseWarned = true;
-  if (state.consentAsked) data.consentAsked = true;
+  const asked = askedDirs(state.consentAskedDirs);
+  if (asked.length > 0) data.consentAskedDirs = asked;
   const tmp = `${file}.${crypto.randomBytes(8).toString('hex')}.tmp`;
   const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | NOFOLLOW, 0o600);
   let done = false;
@@ -411,9 +419,10 @@ const QUOTED_BACKSLASH = /\\(?=[\\']|$)/;
 // higher-priority one empty; for the ~/.claude default, CLAUDE_CONFIG_DIR is the absolute <home>/.claude this
 // process resolved), so it records into that store whatever the terminal exports and whatever its HOME is. A
 // store whose location is not an absolute path is unavailable and gets no command.
-// Every path in it is shell-quoted, so pasting it into a POSIX shell runs nothing but node on the consent
-// script. A path with control characters, or (outside Windows) with a backslash that shells quote
-// differently (QUOTED_BACKSLASH), is not offered as a command at all, and the request names which path it is.
+// Every path in it is shell-quoted, so pasting it into a POSIX shell (on Windows: PowerShell, with the
+// PowerShell quoting of the consent script) runs nothing but node on the consent script. A path with control
+// characters, or (outside Windows) with a backslash that shells quote differently (QUOTED_BACKSLASH), is not
+// offered as a command at all, and the request names which path it is.
 function approvalRequest(dir) {
   const consent = require(CONSENT_SCRIPT);
   const text = `verify-gate: ${consent.shownPath(path.join(dir, VERIFY_REL))} was not run because this command ` +
@@ -444,12 +453,22 @@ function approvalRequest(dir) {
     return `${text}The path of ${naming(backslash)} contains a backslash, which shells quote differently, so no ` +
       'approve command is offered; move or rename it, then approve the check with scripts/verify-consent.js in a terminal.';
   }
+  if (!POSIX) {
+    // PowerShell: `$env:` assignments, then node, each value in PowerShell single quotes. An assignment of
+    // '' removes the variable. The assignments are statements, so they stay set in that window.
+    const q = consent.powerShellQuote;
+    const assign = store.name === 'CLAUDE_PLUGIN_DATA'
+      ? `$env:CLAUDE_PLUGIN_DATA=${q(store.value)}; `
+      : `$env:CLAUDE_PLUGIN_DATA=''; $env:CLAUDE_CONFIG_DIR=${q(store.value)}; `;
+    return `${text}To approve it, run this yourself in PowerShell in a console window (it must be run in a ` +
+      'console window; the $env: assignments stay set in that PowerShell window): ' +
+      `${assign}node ${q(CONSENT_SCRIPT)} approve ${q(dir)}`;
+  }
   const assign = store.name === 'CLAUDE_PLUGIN_DATA'
     ? `CLAUDE_PLUGIN_DATA=${shellQuote(store.value)} `
     : `CLAUDE_PLUGIN_DATA= CLAUDE_CONFIG_DIR=${shellQuote(store.value)} `;
-  const shell = POSIX ? ', in a POSIX shell such as bash or zsh' : '';
-  return `${text}To approve it, run this yourself${shell} in a terminal (it must be run in a terminal): ` +
-    `${assign}node ${shellQuote(CONSENT_SCRIPT)} approve ${shellQuote(dir)}`;
+  return `${text}To approve it, run this yourself, in a POSIX shell such as bash or zsh in a terminal (it must be ` +
+    `run in a terminal): ${assign}node ${shellQuote(CONSENT_SCRIPT)} approve ${shellQuote(dir)}`;
 }
 
 // One line of compact JSON whose only key is systemMessage; the value never holds a line break.
@@ -482,12 +501,14 @@ async function onStop(input, session) {
 
   // A check runs only after this exact command was approved for this repository and the directory that
   // holds it (relative to the checkout's top level). Otherwise the stop
-  // passes and the session stays dirty; the first such stop per session and project asks for approval.
+  // passes and the session stays dirty; the first such stop per session and check directory asks for
+  // approval. The directory is remembered by its real path, so every symlinked spelling is asked about once.
   const consent = require(CONSENT_SCRIPT);
   if (!consent.isApproved(check.dir, check.command)) {
-    if (!state.consentAsked) {
+    const dir = realPathOf(check.dir);
+    if (!state.consentAskedDirs.includes(dir)) {
       systemMessage(approvalRequest(check.dir));
-      writeState(stateFile, { ...state, consentAsked: true });
+      writeState(stateFile, { ...state, consentAskedDirs: [...state.consentAskedDirs, dir] });
     }
     return 0;
   }
@@ -537,8 +558,8 @@ async function onStop(input, session) {
 function onEdit(input, session) {
   const cwd = eventCwd(input);
   const stateFile = stateFileFor(session, editProject(input, cwd));
-  const { looseWarned, consentAsked } = readState(stateFile);
-  writeState(stateFile, { dirty: true, failures: 0, looseWarned, consentAsked });
+  const { looseWarned, consentAskedDirs } = readState(stateFile);
+  writeState(stateFile, { dirty: true, failures: 0, looseWarned, consentAskedDirs });
   return 0;
 }
 

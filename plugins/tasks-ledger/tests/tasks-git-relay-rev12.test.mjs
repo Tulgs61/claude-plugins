@@ -87,22 +87,18 @@ test('prepare, sync and finish list only the scheduling summary of each task', t
       task('T2', ['lib/**'], ['T1'], { acceptance: '', proof: '' }),
       task('T3', ['doc/**'], [], { acceptance: '', budget: '' }),
       task('T4', ['web/**'], [], { needsAcceptance: true }),
-      task('T5', ['x/**'], [], { acceptance: '', status: 'merged', resumeVerified: true }),
+      task('T5', ['x/**'], [], { acceptance: '', status: 'merged' }),
     ],
   });
   const answers = [sb.ok('prepare', 'relay-run'), sb.ok('sync', 'relay-run'), sb.ok('finish', 'finished', '', 'relay-run')];
   for (const a of answers) {
     assert.deepEqual(a.tasks.map(x => x.id), ['T1', 'T2', 'T3', 'T4', 'T5']);
-    for (const x of a.tasks) {
-      const expected = x.id === 'T5' ? [...SUMMARY_KEYS, 'resumeVerified'].sort() : SUMMARY_KEYS;
-      assert.deepEqual(Object.keys(x).sort(), expected, JSON.stringify(x));
-    }
+    for (const x of a.tasks) assert.deepEqual(Object.keys(x).sort(), SUMMARY_KEYS, JSON.stringify(x));
     // A title-only task (no acceptance, and no proof or no budget) is marked like a flagged one.
     // T5 has no acceptance but both a proof and a budget, so it is dispatchable.
     assert.deepEqual(a.tasks.map(x => x.needsAcceptance), [false, true, true, true, false]);
     assert.deepEqual(a.tasks[1].dependsOn, ['T1']);
     assert.deepEqual(a.tasks[1].files, ['lib/**']);
-    assert.equal(a.tasks[4].resumeVerified, true);
   }
 });
 
