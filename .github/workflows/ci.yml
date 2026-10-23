@@ -37,10 +37,15 @@ jobs:
         if: runner.os != 'Windows'
         run: node scripts/verify.mjs
 
-      # handover and tasks-ledger rely on POSIX shells and paths; only mockup-loop runs on Windows.
+      # handover and tasks-ledger rely on POSIX shells and paths; on Windows the mockup-loop suite runs, and
+      # of tasks-ledger only the tests of approving a check on native Windows.
       - name: Verify (mockup-loop only)
         if: runner.os == 'Windows'
         run: node scripts/verify.mjs --only plugins/mockup-loop
+
+      - name: Test tasks-ledger approval on native Windows
+        if: runner.os == 'Windows'
+        run: node --test plugins/tasks-ledger/tests/hooks-verify-consent-windows-rev13.test.mjs plugins/tasks-ledger/tests/hooks-verify-consent-shells-rev11.test.mjs
 
   validate:
     name: validate plugins

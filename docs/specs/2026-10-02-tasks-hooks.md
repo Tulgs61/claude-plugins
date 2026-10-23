@@ -468,7 +468,7 @@ concern verify-gate and `scripts/verify-consent.js`. dispatch-guard is unchanged
    on POSIX, so that the real `openTerminal` (opening `/dev/tty`, the synchronous write loop, the
    byte-wise read) runs without the module seam. No behaviour changes.
 3. **The POSIX command names its shell and avoids the backslashes shells read differently.** Native Windows is
-   unchanged (it still cannot record an approval). On every other platform:
+   not covered here (rev 13, amendments 5 and 6 add approval there). On every other platform:
    - the request says the command is for a POSIX shell such as bash or zsh;
    - when one of the quoted paths (the consent script, the store value, the directory) contains a
      backslash, no command is offered. The request names which path it is, as rev 10, amendment 28
@@ -547,7 +547,8 @@ concern verify-gate and `scripts/verify-consent.js`. dispatch-guard is unchanged
      changed.
 6. **README.** The consent section of `plugins/tasks-ledger/README.md` (and the root README's
    `.claude/verify.cmd` opt-in section) states: the printed command pins the store; it is for a POSIX
-   shell, and paths with a backslash get no command; native Windows still cannot record an approval; an approval covers one check directory.
+   shell, and paths with a backslash get no command; an approval covers one check directory. (What it says
+   about native Windows is set by rev 13, amendment 7.)
 7. **Fix round.** These sharpen amendments 1, 3 and 4.
    - **Backslash rule, exact form.** Amendment 3's refusal applies to a backslash in a quoted path that is
      followed by another backslash or a single quote, or that ends the path. Those are the only
@@ -626,7 +627,7 @@ concern verify-gate and `scripts/verify-consent.js`. dispatch-guard is unchanged
 
 These amendments take precedence over every earlier section and amendment where they differ.
 Amendments 1 and 2 concern `scripts/verify-consent.js`; amendments 3 and 4 concern verify-gate's approval
-request. dispatch-guard is unchanged.
+request; amendments 5 to 8 add approval on native Windows. dispatch-guard is unchanged.
 
 1. **A backslash is not a separator in a check directory on POSIX.** Rev 11, amendment 4 refuses a
    stored `dir` that contains `..` as a segment, and amendment 7 refuses the same check directory on
@@ -673,3 +674,55 @@ request. dispatch-guard is unchanged.
    silent; a state file with `consentAsked: true` keeps its count and `looseWarned` and still shows each
    directory's request once; a malformed `consentAskedDirs` counts as none. The state-file ownership test
    of rev 10, amendment 22 carries `consentAskedDirs` instead of `consentAsked`.
+5. **approve asks in the Windows console.** On native Windows (`win32`) the terminal of rev 10, amendment 11
+   is the console of the process. On every other platform it stays `/dev/tty`, unchanged.
+   - `approve` opens the console input buffer `\\.\CONIN$` and the active screen buffer `\\.\CONOUT$`, both
+     with the existing-file disposition (`r+`). The device names are used because a bare `CONIN$` would be
+     resolved against the working directory. It writes the display and the question to `CONOUT$` (and the
+     display to stdout, as on POSIX) and reads the answer byte by byte from `CONIN$` up to a line feed, the
+     end of input or a read error, dropping a trailing carriage return. Only the exact answer `yes` records.
+   - Both handles are closed on every path: after the answer, after any refusal (store, check directory,
+     missing `verify.cmd`), after a failed write or read, and the second also when closing the first fails.
+     When `CONIN$` opens but `CONOUT$` does not, `CONIN$` is closed.
+   - Without a console (either open fails) `approve` exits 2 at once with `needs a terminal` on stderr and
+     nothing on stdout, as on POSIX. Opening never waits. A process that has a console nobody types into
+     still waits for its answer, as with a terminal on POSIX.
+   - The console functions (`openSync`, `closeSync`, `readSync`, `writeSync`) and the platform can be
+     injected through `openTerminal({ platform, io })`, reachable only by loading the script as a module.
+6. **The approval request offers a PowerShell command on native Windows.** On every other platform it is
+   unchanged (rev 11, amendments 3 and 7).
+   - The command is `$env:CLAUDE_PLUGIN_DATA='<value>'; node '<consent script>' approve '<dir>'` when
+     `CLAUDE_PLUGIN_DATA` chose the store, and otherwise `$env:CLAUDE_PLUGIN_DATA=''; $env:CLAUDE_CONFIG_DIR='<value>';
+     node '<consent script>' approve '<dir>'`, with `<value>` as in rev 11, amendment 1. An assignment of
+     `''` removes the variable.
+   - Every value is in PowerShell single quotes, and every character PowerShell reads as a single quote
+     there (`'`, U+2018, U+2019, U+201A, U+201B) is doubled. Nothing else is special inside them, so a
+     backslash keeps the command; the control-character rule still refuses a command.
+   - The request says to run it in PowerShell in a console window, and that its `$env:` assignments stay
+     set in that PowerShell window.
+7. **A Windows store location must be fully qualified.** On native Windows the value that selects the store
+   (rev 10, amendment 9) counts as an absolute path only when it starts with a drive letter followed by `\`
+   or `/`, or with two separators and a name (a UNC or device path). `\data` and `/data` (rooted on the
+   current drive) and `C:data` (relative to that drive's working directory) leave the store unavailable,
+   with the consequences of rev 11. POSIX is unchanged.
+   - README: on native Windows an approval is recorded through the console, with the PowerShell command of
+     amendment 6, and the store location must be fully qualified.
+8. **Tests**, in `plugins/tasks-ledger/tests/hooks-verify-consent-windows-rev13.test.mjs`, each able to fail
+   on the commit before the change:
+   - on every platform, through the injected console with `platform: 'win32'`: no console (exit 2 at once,
+     nothing on stdout or recorded); `CONOUT$` failing after `CONIN$` (exit 2, `CONIN$` closed); `yes`
+     (recorded, read only from `CONIN$`, written only to `CONOUT$`, the question last); another answer, end
+     of input or a read error (exit 1, nothing recorded); a failed write, a missing `verify.cmd` and a
+     failed close (both handles closed). With a POSIX platform, `/dev/tty` is opened once with `r+` and
+     closed once;
+   - on every platform: the quoting of amendment 6 and the store rule of amendment 7;
+   - wherever `pwsh` or `powershell` is found, and always under `CI` on Windows: quoted samples (quotes of
+     every kind, backslashes, `$`, non-BMP characters) read back exactly in PowerShell;
+   - native Windows only: the real script started without a console (detached) exits 2 within 30 seconds;
+     the gate's request for a directory whose name holds `'`, U+2018, U+2019, U+201A, U+201B and `$`, with
+     a `CLAUDE_PLUGIN_DATA` store and with the default store, is the exact command of amendment 6, and run
+     in PowerShell with `node` replaced by a function it sets the store variables and passes the script,
+     `approve` and the directory unchanged.
+   - `plugins/tasks-ledger/tests/hooks-verify-consent-shells-rev11.test.mjs` gains a native Windows test:
+     the request names PowerShell and keeps the command for a path with backslashes.
+   - CI runs both files on `windows-latest`.

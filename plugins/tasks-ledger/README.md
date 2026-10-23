@@ -141,13 +141,17 @@ tests/                       node:test suites
 - **Consent.** An approval covers one check directory: the directory that contains `.claude/`, relative to
   the top level of its checkout (linked worktrees share the main checkout's approvals). The approve command
   the gate prints pins the store it reads (for the `~/.claude` default, `CLAUDE_PLUGIN_DATA=` and
-  `CLAUDE_CONFIG_DIR='<home>/.claude'`), so it records there whatever your terminal exports. It is for a
-  POSIX shell such as bash or zsh; a path with a backslash that shells quote differently inside single
-  quotes (before another backslash or a single quote, or at the end), or with a control character, gets no
-  command. Native Windows still cannot record an approval. The store's location (`CLAUDE_PLUGIN_DATA`,
-  else `CLAUDE_CONFIG_DIR`, else your home directory) must be an absolute path; otherwise no approval
-  applies, no command is offered, and `approve`, `revoke` and `list` change nothing and exit 2. See
-  [verify consent](../../README.md#the-claudeverifycmd-opt-in).
+  `CLAUDE_CONFIG_DIR='<home>/.claude'`), so it records there whatever your terminal exports. Outside
+  Windows it is for a POSIX shell such as bash or zsh; a path with a backslash that shells quote
+  differently inside single quotes (before another backslash or a single quote, or at the end), or with a
+  control character, gets no command. On native Windows `approve` asks in the console window it runs in
+  (it writes to `CONOUT$` and reads the answer from `CONIN$`; without a console it exits 2 at once), and
+  the command is for PowerShell: `$env:` assignments, then `node`, every value in single quotes with every
+  single-quote character doubled (also `‘` and `’`). Those `$env:` assignments stay set in that PowerShell
+  window. The store's location (`CLAUDE_PLUGIN_DATA`, else `CLAUDE_CONFIG_DIR`, else your home directory)
+  must be an absolute path (on Windows a fully qualified one: a drive letter followed by `\` or `/`, or a
+  UNC path); otherwise no approval applies, no command is offered, and `approve`, `revoke` and `list`
+  change nothing and exit 2. See [verify consent](../../README.md#the-claudeverifycmd-opt-in).
 - **Nothing is pushed by default.** [`scripts/tasks-git.js`](scripts/tasks-git.js) pushes only when the
   ledger has `prs: true` (set only when you asked for PRs), and then only `task/<topic>/*` branches —
   never `task/<topic>/integration`, never a permanent branch. It opens draft PRs and never merges them.
