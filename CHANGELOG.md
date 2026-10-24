@@ -54,6 +54,39 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ## tasks-ledger
 
+### [0.5.1] - 2026-10-24
+
+#### Fixed
+
+- `approve` records an approval on native Windows. It asks in the console window it runs in (it
+  writes to `CONOUT$`, reads the answer from `CONIN$` and closes both on every path) and exits 2 at once
+  without a console instead of hanging. The gate offers a PowerShell command there: `$env:` assignments,
+  then `node`, every value in single quotes with every single-quote character doubled (also `‘` and
+  `’`). CI runs the test for it on `windows-latest`. (#8)
+- The verify gate asks for approval once per check directory in each session, not once per project. A
+  stop in an unapproved subdirectory now shows that directory's request even after the top level was
+  asked about. Session state written by older versions is still read. (#12)
+- On POSIX a backslash in a stored check directory is part of the name, not a separator: a real
+  directory named `a\..\b` can be approved and its approval is honoured. `a/../b` and `../x` are still
+  refused, and on Windows both separators still count. (#13)
+- A line another writer appended to the inbox while a carry-over write failed partway is no longer
+  lost. When it is joined to the incomplete line left behind, the next `sync` reads it from the line's
+  ending and drops the incomplete part. (#15)
+- The workflow scans a relayed answer upward for the last line whose check holds, so a line the relay
+  appended after the sealed answer no longer costs an attempt. (#19)
+- The `T<n> started` log line names the task's title again. A task resumed as verified logs that it is
+  being merged. (#19)
+- A proof or budget given as a non-string value, such as a number, counts as present again when
+  `needsAcceptance` is computed, as it did before 0.5.0. (#19)
+
+#### Changed
+
+- The task listing no longer carries `resumeVerified`; nothing wrote or read it. (#21)
+- The `tasks-git` and `tasks-engine` specs describe the 0.5.0 relay check, the `task <ledger> <id>`
+  command and the full record fetched before dispatch. The engine spec says a timer refresh counts as in
+  flight only once its helper call is made, and the timer test now checks that no `sync` is sent while
+  only verify runs. (#11, #20)
+
 ### [0.5.0] - 2026-10-17
 
 #### Fixed
