@@ -5,7 +5,7 @@
 // writes the ledger and never touches remote branches or requests.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { TOPIC, sandbox, task } from './helpers/git-sandbox.mjs';
 
@@ -73,7 +73,7 @@ test('a real run removes tasks merged by merge commit, their -base branch and th
   assert.deepEqual(names(r.removed), [b('T1'), b('T2'), b('T3'), b('T3-base'), b('integration')].sort());
   assert.deepEqual(r.kept, []);
   assert.deepEqual(branches(sb), ['main']);
-  assert.deepEqual(worktreePaths(sb), [sb.repo], 'only the main worktree is left, and prune ran');
+  assert.deepEqual(worktreePaths(sb), [sb.repo], 'only the main worktree is left');
   assert.equal(existsSync(sb.lockFile), false);
   assert.deepEqual(sb.originHeads(), ['main'], 'remote branches are never touched');
 });
@@ -331,14 +331,20 @@ test('a stale lock of another run is put back byte for byte; an unreadable one r
   assert.equal(readFileSync(sb.lockFile, 'utf8'), 'not json');
 });
 
-test('a missing worktree outside .claude/worktrees/ keeps its branch as outside, also in a real run', t => {
+test('a missing worktree outside .claude/worktrees/ keeps its branch and registration over two real runs', t => {
   const sb = finishedRun(t);
   landOnMain(sb);
   sb.git(sb.repo, 'worktree', 'remove', sb.taskOf('T1').worktree);
-  const review = path.join(sb.tmp, 'volume', 'review');
+  const volume = path.join(sb.tmp, 'volume');
+  const review = path.join(volume, 'review');
   sb.git(sb.repo, 'worktree', 'add', '-q', review, b('T1'));
-  rmSync(path.join(sb.tmp, 'volume'), { recursive: true, force: true });
-  const r = sb.ok('cleanup');
-  assert.equal(reasonOf(r, b('T1')), 'outside');
-  assert.ok(branches(sb).includes(b('T1')));
+  // The volume is unmounted: its directory is gone for now.
+  renameSync(volume, `${volume}-away`);
+  for (let pass = 1; pass <= 2; pass++) {
+    const r = sb.ok('cleanup');
+    assert.equal(reasonOf(r, b('T1')), 'outside', `pass ${pass}`);
+    assert.ok(branches(sb).includes(b('T1')), `pass ${pass}: the branch stays`);
+  }
+  renameSync(`${volume}-away`, volume);
+  assert.equal(sb.git(review, 'rev-parse', '--abbrev-ref', 'HEAD'), b('T1'), 'the worktree still works');
 });

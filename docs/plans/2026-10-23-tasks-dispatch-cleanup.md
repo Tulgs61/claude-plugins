@@ -1,7 +1,8 @@
 ---
-status: in-progress
+status: done
 issue: "#31"
 branch: feature/tasks-dispatch-cleanup
+pr: "#32"
 ---
 
 # tasks-ledger: a cleanup command and a parallelism cap
@@ -264,3 +265,7 @@ untracked, is kept and reported as `dirty`, whatever its merge state.
 - Review fixes in `cleanup`: the integration branch also counts the merged heads of ledger tasks
   whose branch an earlier pass removed; a real run prunes first; `pr` must be an http(s) URL; fetch
   and forge calls never prompt and time out; a failed lock restore after a real run is a warning.
+- Cleanup never runs `git worktree prune` (the plan had it end with one, and an interim version
+  pruned first). An item's worktree is its registration, present or not: a missing one inside
+  `.claude/worktrees/` is removed with `git worktree remove`, a missing one outside is kept as
+  `outside` with its registration, so an unmounted volume's worktree survives repeated runs.

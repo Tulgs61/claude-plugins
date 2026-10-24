@@ -1556,11 +1556,6 @@ function cleanupUnderLock(ctx, dryRun) {
     const f = run('git', ['fetch', '-q', 'origin', L.baseBranch], root, CLEANUP_REMOTE_OPTS);
     if (f.status !== 0) warnings.push(`git fetch origin ${L.baseBranch} failed: ${(f.stderr || f.stdout || `exit ${exitCode(f)}`).trim()}`);
   }
-  // A real run first drops registrations of worktrees whose directory is gone, so their branches
-  // can be deleted; a dry run changes nothing. Registrations are read before, so a missing worktree
-  // outside .claude/worktrees/ (an unmounted volume, say) still keeps its branch as `outside`.
-  const registered = worktrees(root);
-  if (!dryRun) git(root, 'worktree', 'prune');
   const baseRefs = [`refs/heads/${L.baseBranch}`, `refs/remotes/origin/${L.baseBranch}`].filter(ref => refExists(root, ref));
   const isAncestor = (sha, ref) => git(root, 'merge-base', '--is-ancestor', sha, ref).status === 0;
   const inBase = sha => baseRefs.some(ref => isAncestor(sha, ref));
@@ -1586,6 +1581,9 @@ function cleanupUnderLock(ctx, dryRun) {
     const rel = path.relative(worktreesDir, realOrSelf(p));
     return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
   };
+  // Every registered worktree, its directory present or not. Cleanup never prunes: a registration
+  // whose directory is gone stays an item's worktree, inside .claude/worktrees/ to be removed with
+  // it, outside (an unmounted volume, say) to be kept with its branch.
   const all = worktrees(root);
   const mainPath = all.length ? all[0].path : null;
 
@@ -1596,10 +1594,8 @@ function cleanupUnderLock(ctx, dryRun) {
     const rest = branch.slice(prefix.length);
     const kind = taskRe.test(rest) ? 'task' : baseRe.test(rest) ? 'base' : rest === 'integration' ? 'integration' : null;
     if (!kind) continue;
-    const w = all.find(x => x.branch === branch && fs.existsSync(x.path));
-    const gone = w ? null : registered.find(x => x.branch === branch && !fs.existsSync(x.path) && !inWorktreesDir(x.path));
-    const item = { branch, kind, id: kind === 'integration' ? null : rest.replace(/-base$/, ''), worktree: w ? w.path : gone ? gone.path : null };
-    if (gone) item.reason = 'outside';
+    const w = all.find(x => x.branch === branch && fs.existsSync(x.path)) || all.find(x => x.branch === branch);
+    const item = { branch, kind, id: kind === 'integration' ? null : rest.replace(/-base$/, ''), worktree: w ? w.path : null };
     item.tip = gitOk(root, 'rev-parse', `refs/heads/${branch}`);
     items.push(item);
   }
@@ -1611,6 +1607,9 @@ function cleanupUnderLock(ctx, dryRun) {
       item.reason = 'outside';
       continue;
     }
+    // A missing worktree inside .claude/worktrees/ holds nothing to lose; `git worktree remove`
+    // drops its registration.
+    if (!fs.existsSync(item.worktree)) continue;
     const st = git(item.worktree, 'status', '--porcelain', '--untracked-files=all');
     if (st.status !== 0) item.reason = `dirty: git status failed: ${(st.stderr || st.stdout).trim()}`;
     else if (st.stdout.trim() !== '') item.reason = 'dirty';
@@ -1706,7 +1705,6 @@ function cleanupUnderLock(ctx, dryRun) {
       }
       removed.push(view(item));
     }
-    git(root, 'worktree', 'prune');
   }
   return { dryRun, removable, removed, kept, ...(warnings.length ? { warnings } : {}) };
 }
