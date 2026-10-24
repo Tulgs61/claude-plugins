@@ -56,11 +56,39 @@ workflow fetches its full record with `task <ledger> <id>` and takes the title, 
 budget and constraints for the implementer and reviewer prompts from there. A task is blocked as not
 dispatchable only when that record has no proof or no budget.
 
+### Parallel tasks
+
+The workflow runs at most 3 tasks at once. A ledger can set its own limit with the top-level
+`maxParallel` (an integer from 1 to 16). Tasks with overlapping `files` never run together, whatever
+the limit. A ready task waiting for a free slot starts as soon as one of the running tasks ends.
+
+### Cleanup
+
+A run leaves its task worktrees under `.claude/worktrees/`, the local `task/<topic>/<Tn>` and
+`task/<topic>/<Tn>-base` branches, and the integration branch. Once the work has landed,
+`/tasks cleanup` removes them through the helper's `cleanup` command. It shows a dry run first and
+removes nothing until you agree.
+
+- A task branch is removed only when its merge is confirmed. Either its tip is contained in the base
+  branch (or in `origin/<base>`, which it fetches first), or its recorded PR is merged and the PR's
+  head is exactly the local tip, which covers squash merges. A PR that is still open keeps the branch
+  as `pr open`, and a commit made after the merged head keeps it as unconfirmed.
+- A `-base` branch goes with its confirmed task. The integration branch goes when it is in the base
+  branch, or when every task branch is confirmed and it holds no commit of its own.
+- A worktree with any change, tracked or untracked, is kept as `dirty`. A worktree outside
+  `.claude/worktrees/` is kept as `outside`, and so is its branch. Worktrees are removed without
+  `--force`.
+- Cleanup holds the run lock while it works and is refused while a run is live. It never writes the
+  ledger and never touches remote branches or PRs.
+
+A run that finishes without PRs ends with this dry run, so its report already lists what cleanup would
+remove and keep. A run with PRs reminds you to run `/tasks cleanup` once they merge.
+
 ## Skills
 
 | Skill | What it does |
 |---|---|
-| `/tasks-ledger:tasks <task list> [open PRs]` | Plans the ledger via `tasks-plan`, shows the rounds, asks once, runs the workflow, reports per task. Also `add <task>` (joins a running run through the ledger's `.inbox.jsonl`), `resume`, `retry <Tn>`, `status`. |
+| `/tasks-ledger:tasks <task list> [open PRs]` | Plans the ledger via `tasks-plan`, shows the rounds, asks once, runs the workflow, reports per task. Also `add <task>` (joins a running run through the ledger's `.inbox.jsonl`), `resume`, `retry <Tn>`, `status`, `cleanup`. |
 | `/tasks-ledger:tasks-plan [goal or spec]` | Writes or refreshes `.claude/runs/YYYY-MM-DD-<topic>.json` (schema: [`schemas/tasks.schema.json`](schemas/tasks.schema.json)) and stops. Partitions by file, serialises overlapping file globs with `dependsOn`, picks the base branch from the project's documented git rules or else the repo's default branch. Runs in a forked context. |
 | `/tasks-ledger:dispatch [task id or task]` | Renders the six-part dispatch contract (outcome, proof, constraints, deliverable, budget, escalation) for one task, as an Agent call, a `claude --bg` command or a `/goal`. Refuses without proof and budget. |
 

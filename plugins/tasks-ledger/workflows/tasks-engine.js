@@ -395,6 +395,9 @@ if (!prepared.ok) {
   };
 }
 
+// At most this many tasks run at once. An older helper's answer has no `maxParallel`: the default.
+const maxParallel = Number.isInteger(prepared.maxParallel) && prepared.maxParallel >= 1 ? prepared.maxParallel : 3;
+
 const tasks = new Map(); // id -> ledger task, in ledger order
 const results = [];
 let stopped = null;
@@ -729,8 +732,9 @@ phase('run tasks');
 try {
   while (!badStart && agentsError === null) {
     if (stopped === null) {
-      // `running` grows inside this loop, so two tasks that become ready together never overlap.
-      for (const t of tasks.values()) if (!running.has(t.id) && ready(t)) start(t);
+      // `running` grows inside this loop, so two tasks that become ready together never overlap, and
+      // no more than `maxParallel` start; a task waiting for a free slot starts when one frees up.
+      for (const t of tasks.values()) if (running.size < maxParallel && !running.has(t.id) && ready(t)) start(t);
     }
     if (running.size > 0) {
       await Promise.race(running.values());
@@ -791,8 +795,23 @@ if (!finished.ok) {
   stopped = oneLine(stopped === null ? why : `${stopped}; ${why}`);
 }
 
+// A finished run without PRs ends with a dry run of the cleanup: what `/tasks cleanup` would remove
+// and keep. With PRs every task is still `pr open`, so only the hint is given. The engine never runs a
+// real cleanup, and a failed dry run is only logged.
+let cleanup = null;
+if (finished.ok && stopped === null) {
+  if (prepared.prs === true) {
+    cleanup = 'after the PRs merge: /tasks cleanup';
+  } else {
+    const dry = await ops('cleanup', 'dry-run');
+    if (dry.ok) cleanup = { removable: list(dry.removable), kept: list(dry.kept) };
+    else log(`cleanup dry run failed: ${dry.error || 'unknown error'}`);
+  }
+}
+
 return {
   blocked,
+  cleanup,
   integration: prepared.integration,
   ledger: ledgerPath,
   locked,

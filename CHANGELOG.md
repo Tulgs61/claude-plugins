@@ -54,6 +54,30 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ## tasks-ledger
 
+### [0.6.0] - 2026-10-24
+
+#### Added
+
+- `/tasks cleanup` and the helper command `cleanup <ledger> [dry-run]` remove the worktrees and
+  local `task/<topic>/…` branches of a run whose work has landed. A task branch goes only when its tip
+  is in the base branch, or its recorded PR is merged at exactly that tip (squash merges). A `-base`
+  branch goes with its confirmed task; the integration branch goes when it is in the base branch or
+  holds nothing but confirmed tasks. Dirty worktrees, worktrees outside `.claude/worktrees/` and
+  unconfirmed branches are kept with a reason. Cleanup holds the run lock, is refused while a run is
+  live, removes worktrees without `--force`, never writes the ledger and never touches remote
+  branches or PRs. The skill shows a dry run and asks before anything is removed. (#31)
+- The optional ledger field `maxParallel` (1 to 16) caps how many tasks run at once. `prepare`
+  reports it, and every command refuses a ledger with another value. (#31)
+- A run that finishes without PRs ends with a cleanup dry run, and the workflow returns its lists as
+  `cleanup`. A run with PRs returns a reminder to run `/tasks cleanup` once they merge. (#31)
+
+#### Changed
+
+- The workflow runs at most 3 tasks at once when the ledger sets no `maxParallel`. Before, it started
+  every ready task at the same time. (#31)
+- The "Cleanup" steps of the tasks skill run the helper instead of git and forge commands the model
+  typed itself. (#31)
+
 ### [0.5.1] - 2026-10-24
 
 #### Added

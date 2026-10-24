@@ -66,7 +66,8 @@ the repository except the ledger file.
   none. A task that still has no acceptance keeps `needsAcceptance`, is reported as needing one, and
   is not counted as ready: it appears in no round.
 - **Top-level keys on a refresh**: you own only `goal`, `baseBranch`, `prs`, `setup`, `suite`,
-  `checkTimeoutMin`, `tasks` (within the rules above) and `topic` (only as the `topic` rule allows).
+  `checkTimeoutMin`, `maxParallel`, `tasks` (within the rules above) and `topic` (only as the
+  `topic` rule allows).
   Every other top-level key, among them `agents`, `runStatus`, `stopReason`, `integrationBranch`
   and any key the schema does not list, is kept exactly as it was: never dropped, renamed or given
   another value.
@@ -122,6 +123,9 @@ Partitioning rules:
 - `suite` (optional): a broader check for the integration branch. Include it only when running it
   locally is safe: no real databases, external services, deployments or paid APIs.
 - `checkTimeoutMin` (optional): only when the checks are known to need longer than usual.
+- `maxParallel` (optional): how many tasks run at once, an integer from 1 to 16; the engine runs 3
+  when it is absent. Set it only when the user asks, or lower it when each worktree is heavy (large
+  installs, slow builds); otherwise leave it out.
 
 ## 5. Validate and reply
 
@@ -139,6 +143,7 @@ Then reply briefly:
 - the ledger path;
 - the tasks as rounds: tasks with no open prerequisites first, then those that wait for them, and
   so on; a task without an acceptance is in no round;
+- how many tasks run at once: the smaller of `maxParallel` (3 when absent) and the widest round;
 - every task that still needs an acceptance (no non-empty `acceptance`), named as needing one and
   not ready, with the hint `/tasks retry <Tn>` once the user has one;
 - a warning, if `.claude/verify.cmd` is not committed, that a run cannot start until it is;

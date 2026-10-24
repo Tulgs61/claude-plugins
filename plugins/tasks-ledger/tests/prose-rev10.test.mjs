@@ -77,18 +77,20 @@ test('rev10-2: dispatch reads the ledger .lock and offers no run worktree while 
   assert.match(freeText, /no ledger and no lock/);
 });
 
-// 3. Cleanup next to a live run.
-test('rev10-3: cleanup reads the .lock first and removes nothing while it is fresh', () => {
+// 3. Cleanup next to a live run. Since rev 14 the helper's `cleanup` takes the `.lock` itself and
+// refuses while a run holds it; the step comes before collecting or removing anything.
+test('rev10-3: cleanup refuses while the .lock is held and removes nothing', () => {
   const cleanup = section(TASKS, 'Cleanup');
   const lockAt = cleanup.indexOf('`.lock`');
-  assert.ok(lockAt >= 0, 'cleanup reads the .lock');
+  assert.ok(lockAt >= 0, 'cleanup names the .lock');
   assert.ok(lockAt < cleanup.indexOf('**Collect.**'), 'before collecting anything');
-  assert.ok(lockAt < cleanup.indexOf('git -C <root> worktree remove'), 'before removing anything');
+  assert.ok(lockAt < cleanup.indexOf('cleanup "<ledger>"`'), 'before removing anything');
   const step = flat(cleanup.slice(lockAt, cleanup.indexOf('**Collect.**')));
   assert.match(step, /six hours/);
   assert.match(step, /remove nothing/);
   assert.match(step, /run id and age/);
   assert.match(step, /stop/);
+  assert.match(step, /never takes over a lock/);
 });
 
 // 4. Named takeover.

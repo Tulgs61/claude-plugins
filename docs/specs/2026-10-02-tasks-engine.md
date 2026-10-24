@@ -573,3 +573,31 @@ These amendments take precedence over every earlier section and amendment where 
        callback's and the heartbeat's own) are removed;
      - two tasks reach a boundary together while due, with no helper call queued ahead of their
        refreshes: exactly one `sync` is sent for that boundary.
+
+## Amendments (rev 14)
+
+These amendments take precedence over every earlier section and amendment where they differ.
+
+1. **Slot cap.** The engine reads `maxParallel` from `prepare`'s answer; an answer without an integer
+   of at least 1 there (an older helper) means 3. In the main loop a ready task starts only while
+   fewer than `maxParallel` tasks are running, in ledger order. The overlap check, and the rule that
+   `running` grows inside the loop, are unchanged. The loop keeps running while any task runs, so a
+   ready task waiting for a slot starts when one frees up; the loop neither deadlocks nor ends early.
+   A ledger without the field used to run every ready task at once and now runs at most 3.
+2. **Closing dry run.** After `finish` succeeds for a run with no stop reason (`finished`):
+   - with `prs` false, the engine calls `cleanup <ledger> dry-run` once, through the same serialised
+     and checked helper path as every other call, and returns `cleanup: {removable, kept}` from its
+     answer. A failed call is logged as `cleanup dry run failed: …` and gives `cleanup: null`; it
+     never changes `stopped`;
+   - with `prs` true it makes no call (every item would be `pr open` right after the requests open)
+     and returns `cleanup: 'after the PRs merge: /tasks cleanup'`.
+   A stopped run, or a refused `finish`, makes no call and returns `cleanup: null`. The engine never
+   runs a real cleanup. The dry run is the only helper call after `finish`; it is made after the
+   refresh timer is stopped, so rev 11's "no timer after the end" holds, and the rev 11 test now
+   accepts it as the last call right after `finish`.
+3. **Tests.** `tests/tasks-engine-parallel-rev14.test.mjs` holds implementers open through the
+   `taskAgent` hook of `runEngine` and counts them: never more than 2 with `maxParallel: 2`, never
+   more than 3 without the field, and 5 with `maxParallel: 99` (the control that shows the count
+   sees concurrency); every task still merges. It pins one `cleanup … dry-run` after `finish` for a
+   finished run without PRs, a failed dry run that is only logged, and no call for a run with PRs or
+   a stopped run.
