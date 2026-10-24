@@ -1,6 +1,5 @@
-// Rev 14: the engine runs at most `maxParallel` tasks at once (3 when prepare names none), and a
-// finished run without PRs ends with a dry run of `cleanup`, whose lists it returns. A run with PRs
-// gets the `/tasks cleanup` hint instead; a stopped run gets neither.
+// Rev 14: the engine runs at most `maxParallel` tasks at once (3 when prepare names none). A finished
+// run returns a `/tasks cleanup` hint and never calls `cleanup`; a stopped run returns no hint.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { task } from './helpers/git-sandbox.mjs';
@@ -55,31 +54,13 @@ test('red control: with a cap above the task count all 5 run at once, so the cou
   assert.deepEqual(merged(result), ['T1', 'T2', 'T3', 'T4', 'T5']);
 });
 
-test('a finished run without PRs calls cleanup dry-run exactly once and returns its lists', async () => {
-  const removable = [{ branch: 'task/t/T1', worktree: '/tmp/wt-T1' }];
-  const kept = [{ branch: 'task/t/integration', worktree: '/tmp/int', reason: 'dirty' }];
-  const { result, opsLines, counts } = await runEngine([task('T1', ['a/**'])], {
-    answers: { cleanup: () => ({ ok: true, dryRun: true, removable, removed: [], kept }) },
-  });
-  assert.equal(result.stopped, null);
-  assert.equal(counts.cleanup, 1);
-  assert.equal(opsLines.filter(l => l.startsWith('cleanup ')).length, 1);
-  assert.match(opsLines.find(l => l.startsWith('cleanup ')), /^cleanup "\/tmp\/ledger\.json" dry-run$/);
-  assert.ok(opsLines.indexOf(opsLines.find(l => l.startsWith('cleanup '))) > opsLines.findIndex(l => l.startsWith('finish ')), 'after finish');
-  assert.deepEqual(result.cleanup, { removable, kept });
-});
+test('a finished run gets the cleanup hint and makes no cleanup call; a stopped run gets neither', async () => {
+  const withoutPrs = await runEngine([task('T1', ['a/**'])]);
+  assert.equal(withoutPrs.result.stopped, null);
+  assert.equal(withoutPrs.counts.cleanup, undefined);
+  assert.equal(withoutPrs.result.cleanup, 'after the integration branch is merged: /tasks cleanup');
+  assert.match(withoutPrs.opsLines.at(-1), /^finish /, 'finish stays the last helper call');
 
-test('a failed cleanup dry run is logged and does not stop the run', async () => {
-  const { result, counts, logs } = await runEngine([task('T1', ['a/**'])], {
-    answers: { cleanup: () => ({ ok: false, error: 'another run holds this ledger', locked: true }) },
-  });
-  assert.equal(counts.cleanup, 1);
-  assert.equal(result.stopped, null);
-  assert.equal(result.cleanup, null);
-  assert.ok(logs.some(l => /cleanup dry run failed: another run holds this ledger/.test(l)));
-});
-
-test('a finished run with PRs and a stopped run make no cleanup call', async () => {
   const withPrs = await runEngine([task('T1', ['a/**'])], {
     answers: {
       prepare: () => ({ ok: true, start: 'abc123', integration: '/tmp/int', prs: true, tasks: [{ id: 'T1', files: ['a/**'], dependsOn: [], status: 'todo', needsAcceptance: false }] }),
@@ -96,4 +77,9 @@ test('a finished run with PRs and a stopped run make no cleanup call', async () 
   assert.notEqual(stopped.result.stopped, null);
   assert.equal(stopped.counts.cleanup, undefined);
   assert.equal(stopped.result.cleanup, null);
+
+  const refused = await runEngine([task('T1', ['a/**'])], {
+    answers: { finish: () => ({ ok: false, error: 'another run holds this ledger', locked: true }) },
+  });
+  assert.equal(refused.result.cleanup, null);
 });

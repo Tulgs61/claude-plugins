@@ -257,5 +257,10 @@ untracked, is kept and reported as `dirty`, whatever its merge state.
   count in-flight implementers with a timed hold instead of a deferred.
 - The schema test's validator gained `minimum` and `maximum`, which `maxParallel` needs.
 - tasks-plan owns `maxParallel` on a refresh, next to `checkTimeoutMin`.
-- `tasks-engine-timer-rev11.test.mjs` pinned `finish` as the last helper call; it now accepts the
-  closing `cleanup … dry-run` right after it (engine spec rev 14, amendment 2).
+- **Phase 3 dropped after review.** Right after a run nothing has landed (PRs open, or the
+  integration branch not merged), so the closing dry run would keep every item. The engine returns
+  a `/tasks cleanup` hint for every finished run instead and makes no `cleanup` call; the rev 11
+  timer test is unchanged again.
+- Review fixes in `cleanup`: the integration branch also counts the merged heads of ledger tasks
+  whose branch an earlier pass removed; a real run prunes first; `pr` must be an http(s) URL; fetch
+  and forge calls never prompt and time out; a failed lock restore after a real run is a warning.

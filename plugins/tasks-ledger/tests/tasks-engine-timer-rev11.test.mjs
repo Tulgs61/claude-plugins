@@ -234,12 +234,11 @@ test('boundaries skip while fresh: no sync between a 4-minute implementer and a 
 });
 
 // After the body returned: no timer is armed, an hour of mocked time makes no helper call, and
-// `finish` was the last helper call, or the last but the closing `cleanup … dry-run` (rev 14).
+// `finish` was the last helper call.
 async function assertNothingAfterTheEnd(engine) {
   assert.deepEqual([...engine.pending], [], 'no armed timer');
   const calls = engine.opsLines.length;
-  const lastIsCleanup = /^cleanup "[^"]*" dry-run$/.test(engine.opsLines[calls - 1]);
-  assert.match(engine.opsLines[calls - (lastIsCleanup ? 2 : 1)], /^finish /, engine.opsLines.join('\n'));
+  assert.match(engine.opsLines[calls - 1], /^finish /, engine.opsLines.join('\n'));
   for (let i = 0; i < 60; i++) {
     mock.timers.tick(MINUTE);
     await drain();

@@ -74,15 +74,17 @@ removes nothing until you agree.
   head is exactly the local tip, which covers squash merges. A PR that is still open keeps the branch
   as `pr open`, and a commit made after the merged head keeps it as unconfirmed.
 - A `-base` branch goes with its confirmed task. The integration branch goes when it is in the base
-  branch, or when every task branch is confirmed and it holds no commit of its own.
+  branch, or when every task branch left is confirmed and each of its non-merge commits is in the base,
+  in a confirmed task, or in the merged head of a task's PR (so it also goes once squash-merged PRs
+  were cleaned up over several passes).
 - A worktree with any change, tracked or untracked, is kept as `dirty`. A worktree outside
   `.claude/worktrees/` is kept as `outside`, and so is its branch. Worktrees are removed without
-  `--force`.
+  `--force`; ignored files in a removed worktree (such as a local `.env`) go with it.
 - Cleanup holds the run lock while it works and is refused while a run is live. It never writes the
   ledger and never touches remote branches or PRs.
 
-A run that finishes without PRs ends with this dry run, so its report already lists what cleanup would
-remove and keep. A run with PRs reminds you to run `/tasks cleanup` once they merge.
+A finished run reminds you to run `/tasks cleanup` once its work has landed: after its PRs merge, or
+after you merge the integration branch.
 
 ## Skills
 

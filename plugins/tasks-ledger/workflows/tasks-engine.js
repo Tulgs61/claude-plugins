@@ -795,18 +795,14 @@ if (!finished.ok) {
   stopped = oneLine(stopped === null ? why : `${stopped}; ${why}`);
 }
 
-// A finished run without PRs ends with a dry run of the cleanup: what `/tasks cleanup` would remove
-// and keep. With PRs every task is still `pr open`, so only the hint is given. The engine never runs a
-// real cleanup, and a failed dry run is only logged.
+// A finished run says when `/tasks cleanup` can remove what it left behind. Right after the run
+// nothing has landed yet (the PRs are open, or the integration branch is not merged), so a dry run
+// here would keep every item; the engine never runs cleanup itself.
 let cleanup = null;
 if (finished.ok && stopped === null) {
-  if (prepared.prs === true) {
-    cleanup = 'after the PRs merge: /tasks cleanup';
-  } else {
-    const dry = await ops('cleanup', 'dry-run');
-    if (dry.ok) cleanup = { removable: list(dry.removable), kept: list(dry.kept) };
-    else log(`cleanup dry run failed: ${dry.error || 'unknown error'}`);
-  }
+  cleanup = prepared.prs === true
+    ? 'after the PRs merge: /tasks cleanup'
+    : 'after the integration branch is merged: /tasks cleanup';
 }
 
 return {

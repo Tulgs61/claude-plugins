@@ -430,8 +430,8 @@ These amendments take precedence over every earlier section and amendment where 
    4. `cleanup <ledger>` removes, and its `removed` and `kept` lists are reported.
    Rev 10 amendment 3, rev 10 amendment 9 and rev 4 amendment 7 hold through the helper; their tests
    now check the new wording, and the rev 10 amendment 9 sandbox test runs the helper's dry run.
-2. **Reporting.** The run report shows the engine result's `cleanup`: the removable and kept lists
-   with an offer of `/tasks cleanup`, the hint for a run with PRs, or nothing when it is `null`.
+2. **Reporting.** The run report passes on the engine result's `cleanup` hint, or says nothing about
+   cleanup when it is `null`.
 3. **`maxParallel` in tasks-plan.** tasks-plan owns `maxParallel` on a refresh, sets it only when the
    user asks or each worktree is heavy, and its rounds reply says how many tasks run at once: the
    smaller of `maxParallel` (3 when absent) and the widest round.

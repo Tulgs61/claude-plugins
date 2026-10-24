@@ -62,14 +62,14 @@ version `<version>` is tagged `<name>--v<version>`.
   local `task/<topic>/…` branches of a run whose work has landed. A task branch goes only when its tip
   is in the base branch, or its recorded PR is merged at exactly that tip (squash merges). A `-base`
   branch goes with its confirmed task; the integration branch goes when it is in the base branch or
-  holds nothing but confirmed tasks. Dirty worktrees, worktrees outside `.claude/worktrees/` and
+  holds nothing but confirmed task work, also over several cleanup passes. Dirty worktrees, worktrees outside `.claude/worktrees/` and
   unconfirmed branches are kept with a reason. Cleanup holds the run lock, is refused while a run is
   live, removes worktrees without `--force`, never writes the ledger and never touches remote
   branches or PRs. The skill shows a dry run and asks before anything is removed. (#31)
 - The optional ledger field `maxParallel` (1 to 16) caps how many tasks run at once. `prepare`
   reports it, and every command refuses a ledger with another value. (#31)
-- A run that finishes without PRs ends with a cleanup dry run, and the workflow returns its lists as
-  `cleanup`. A run with PRs returns a reminder to run `/tasks cleanup` once they merge. (#31)
+- A finished run returns `cleanup`, a reminder to run `/tasks cleanup` once its PRs merge or its
+  integration branch is merged. (#31)
 
 #### Changed
 

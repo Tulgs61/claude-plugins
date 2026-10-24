@@ -220,10 +220,9 @@ When the workflow returns, read the ledger once more and tell the user:
 - **Per task**: id, status, branch and PR (or "none").
 - **Needs acceptance**: every task with `needsAcceptance` true, marked as needing an acceptance
   before `/tasks retry <Tn>` can run it.
-- **Cleanup**: when the result's `cleanup` is an object (a finished run without PRs), list its
-  `removable` items and its `kept` items with their reasons, and offer `/tasks cleanup` once the work
-  has landed. When it is a string (a finished run with PRs), pass it on: `/tasks cleanup` after the
-  PRs merge. When it is `null`, say nothing about cleanup.
+- **Cleanup**: when the result's `cleanup` is set (a finished run), pass on its hint: `/tasks cleanup`
+  once the PRs merge, or once the integration branch is merged. When it is `null`, say nothing about
+  cleanup.
 
 ## Cleanup
 
@@ -252,8 +251,9 @@ its answer and ask.
    The helper removes only what it confirmed merged: a task branch whose tip is in the base branch,
    or whose recorded PR is merged at exactly that tip (a squash merge); a `-base` branch inside a
    confirmed task branch; the integration branch when it is in the base branch or holds nothing but
-   the confirmed tasks. It runs `git worktree remove` without `--force`, so a worktree with any change
-   stays, and `git branch -D` only for a branch whose merge it confirmed. Anything that changed since
+   confirmed task work. It runs `git worktree remove` without `--force`, so a worktree with a tracked
+   or untracked change stays (ignored files such as a local `.env` are removed with it), and
+   `git branch -D` only for a branch whose merge it confirmed. Anything that changed since
    the dry run is judged again and may be kept.
 
 Remote branches and PRs are left alone.

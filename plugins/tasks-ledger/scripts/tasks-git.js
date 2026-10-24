@@ -1496,13 +1496,17 @@ function opPrs(ctx) {
 
 // ---- cleanup -----------------------------------------------------------------------------------
 
+// Calls that reach a remote while cleanup holds the lock never prompt and never run unbounded.
+const CLEANUP_REMOTE_OPTS = { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, timeout: 2 * 60 * 1000 };
+
 // The state and head sha of a request as the forge reports them: { state: 'merged' | 'open' |
 // 'closed' | ..., head }, or { error } when the CLI fails or prints something else.
 function forgeRequest(ctx, url) {
+  if (!/^https?:\/\/\S+$/.test(url)) return { error: 'the recorded request is not an http(s) URL' };
   const gitlab = git(ctx.root, 'remote', 'get-url', 'origin').stdout.trim().includes('gitlab');
   const cli = gitlab ? forgeCli('TASKS_GIT_GLAB', 'glab') : forgeCli('TASKS_GIT_GH', 'gh');
   const args = gitlab ? ['mr', 'view', url, '-F', 'json'] : ['pr', 'view', url, '--json', 'state,headRefOid'];
-  const r = run(cli.program, [...cli.lead, ...args], ctx.root);
+  const r = run(cli.program, [...cli.lead, ...args], ctx.root, CLEANUP_REMOTE_OPTS);
   if (r.status !== 0) return { error: (r.stderr || r.stdout || String(r.error || '')).trim() || `exit ${exitCode(r)}` };
   try {
     const o = JSON.parse(r.stdout);
@@ -1531,7 +1535,13 @@ function opCleanup(ctx, [mode]) {
     }
     throw e;
   }
-  restoreLock(ctx, lock);
+  // What was removed is already gone, so a failed restore is reported with the answer, not instead.
+  try {
+    restoreLock(ctx, lock);
+  } catch (e) {
+    const why = e instanceof Failure ? e.message : systemError(e);
+    result.warnings = [...(result.warnings || []), `could not restore the run lock ${ctx.lockFile}: ${why}`];
+  }
   return result;
 }
 
@@ -1543,9 +1553,12 @@ function cleanupUnderLock(ctx, dryRun) {
   const baseRe = /^(T[0-9]+)-base$/;
 
   if (git(root, 'remote', 'get-url', 'origin').status === 0) {
-    const f = git(root, 'fetch', '-q', 'origin', L.baseBranch);
-    if (f.status !== 0) warnings.push(`git fetch origin ${L.baseBranch} failed: ${(f.stderr || f.stdout).trim()}`);
+    const f = run('git', ['fetch', '-q', 'origin', L.baseBranch], root, CLEANUP_REMOTE_OPTS);
+    if (f.status !== 0) warnings.push(`git fetch origin ${L.baseBranch} failed: ${(f.stderr || f.stdout || `exit ${exitCode(f)}`).trim()}`);
   }
+  // A real run first drops registrations of worktrees whose directory is gone, so their branches
+  // can be deleted; a dry run changes nothing.
+  if (!dryRun) git(root, 'worktree', 'prune');
   const baseRefs = [`refs/heads/${L.baseBranch}`, `refs/remotes/origin/${L.baseBranch}`].filter(ref => refExists(root, ref));
   const isAncestor = (sha, ref) => git(root, 'merge-base', '--is-ancestor', sha, ref).status === 0;
   const inBase = sha => baseRefs.some(ref => isAncestor(sha, ref));
@@ -1590,17 +1603,26 @@ function cleanupUnderLock(ctx, dryRun) {
     else if (st.stdout.trim() !== '') item.reason = 'dirty';
   }
 
+  const requests = new Map(); // pr -> forge answer, so each request is asked about once
+  const requestOf = pr => {
+    if (!requests.has(pr)) requests.set(pr, forgeRequest(ctx, pr));
+    return requests.get(pr);
+  };
+  const prOf = id => {
+    const t = L.tasks.find(x => x.id === id);
+    return t && typeof t.pr === 'string' && t.pr ? t.pr : null;
+  };
+
   // Task branches: (a) the tip is in the base, or (b) the request is merged at exactly this tip.
   const confirmed = new Set();
   for (const item of items.filter(x => x.kind === 'task')) {
     let why = null;
     if (!inBase(item.tip)) {
-      const t = L.tasks.find(x => x.id === item.id);
-      const pr = t && typeof t.pr === 'string' && t.pr ? t.pr : null;
+      const pr = prOf(item.id);
       if (!pr) {
         why = `unconfirmed: not in ${L.baseBranch} and no request recorded`;
       } else {
-        const req = forgeRequest(ctx, pr);
+        const req = requestOf(pr);
         if (req.error) why = `unconfirmed: cannot read ${pr}: ${req.error}`;
         else if (req.state === 'open') why = 'pr open';
         else if (req.state !== 'merged') why = `unconfirmed: ${pr} is ${req.state}, not merged`;
@@ -1623,19 +1645,30 @@ function cleanupUnderLock(ctx, dryRun) {
     if (!ok && !item.reason) item.reason = `unconfirmed: not in ${L.baseBranch} nor in a confirmed ${prefix}${item.id}`;
   }
 
-  // The integration branch: in the base, or every commit on it that is no merge comes from a task
-  // branch, and every task branch is confirmed.
+  // The integration branch: in the base, or every task branch left is confirmed and every commit on
+  // it that is no merge is in the base, in a confirmed task tip, or in the merged head of a ledger
+  // task's request. The merged heads cover tasks whose squash-merged branch an earlier cleanup
+  // already removed; a head not present locally covers nothing.
   for (const item of items.filter(x => x.kind === 'integration')) {
     if (inBase(item.tip)) continue;
     const tasks = items.filter(x => x.kind === 'task');
-    const allConfirmed = tasks.length > 0 && tasks.every(x => confirmed.has(x.branch));
+    const allConfirmed = tasks.every(x => confirmed.has(x.branch));
     let own = '';
     if (allConfirmed) {
-      own = gitOk(root, 'rev-list', '--no-merges', `refs/heads/${item.branch}`, '--not', ...tasks.map(x => x.tip), ...baseRefs);
+      const heads = [];
+      for (const t of L.tasks) {
+        if (typeof t.id !== 'string' || items.some(x => x.kind === 'task' && x.id === t.id)) continue;
+        const pr = prOf(t.id);
+        if (!pr) continue;
+        const req = requestOf(pr);
+        if (req.state !== 'merged' || typeof req.head !== 'string' || !/^[0-9a-f]{40}$/.test(req.head)) continue;
+        if (git(root, 'cat-file', '-e', `${req.head}^{commit}`).status === 0) heads.push(req.head);
+      }
+      own = gitOk(root, 'rev-list', '--no-merges', `refs/heads/${item.branch}`, '--not', ...tasks.map(x => x.tip), ...heads, ...baseRefs);
     }
     if ((!allConfirmed || own !== '') && !item.reason) {
       item.reason = allConfirmed
-        ? 'unconfirmed: commits on the integration branch that come from no task'
+        ? 'unconfirmed: commits on the integration branch that are in no confirmed task'
         : 'unconfirmed: not every task branch is confirmed';
     }
   }

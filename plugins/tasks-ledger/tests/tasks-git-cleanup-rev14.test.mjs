@@ -5,7 +5,7 @@
 // writes the ledger and never touches remote branches or requests.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { TOPIC, sandbox, task } from './helpers/git-sandbox.mjs';
 
@@ -154,7 +154,7 @@ test('the integration branch: kept with a direct commit, removed once its tip is
   sb.env.FAKE_GH_HEAD = sb.sha(sb.repo, b('T1'));
   const r = sb.ok('cleanup', 'dry-run');
   assert.ok(names(r.removable).includes(b('T1')));
-  assert.equal(reasonOf(r, b('integration')), 'unconfirmed: commits on the integration branch that come from no task');
+  assert.equal(reasonOf(r, b('integration')), 'unconfirmed: commits on the integration branch that are in no confirmed task');
 
   landOnMain(sb);
   const after = sb.ok('cleanup');
@@ -209,4 +209,124 @@ test('a mode other than dry-run is refused', t => {
   const r = sb.run('cleanup', 'force');
   assert.equal(r.ok, false);
   assert.match(r.error, /bad cleanup mode "force"/);
+});
+
+// ---- after review --------------------------------------------------------------------------------
+
+// Two tasks with requests; the fake forge reports one state and head for every request, so each
+// pass sets the head of the request it confirms.
+function twoRequests(t) {
+  const sb = sandbox(t, { prs: true, tasks: [task('T1', ['a/**']), task('T2', ['b/**'])] });
+  sb.ok('prepare', 'run-one');
+  sb.complete('T1');
+  sb.complete('T2');
+  sb.ok('finish', 'finished');
+  sb.ok('prs');
+  sb.env.FAKE_GH_STATE = 'merged';
+  return sb;
+}
+
+// Sets what the fake forge reports for each task's request: id -> [state, head ref or sha].
+function forgeSays(sb, byTask) {
+  const requests = {};
+  for (const [id, [state, ref]] of Object.entries(byTask)) {
+    requests[sb.taskOf(id).pr] = { state, head: /^[0-9a-f]{40}$/.test(ref) ? ref : sb.sha(sb.repo, ref) };
+  }
+  sb.env.FAKE_GH_REQUESTS = JSON.stringify(requests);
+}
+
+test('squash merges cleaned up in two passes: the integration branch goes in the second', t => {
+  const sb = twoRequests(t);
+  const t1 = sb.sha(sb.repo, b('T1'));
+  forgeSays(sb, { T1: ['merged', t1], T2: ['open', b('T2')] });
+  const first = sb.ok('cleanup');
+  assert.deepEqual(names(first.removed), [b('T1')]);
+  assert.equal(reasonOf(first, b('T2')), 'pr open');
+  assert.equal(reasonOf(first, b('integration')), 'unconfirmed: not every task branch is confirmed');
+
+  // T1's branch is gone; its request still reports T1's head, which is present locally.
+  forgeSays(sb, { T1: ['merged', t1], T2: ['merged', b('T2')] });
+  const second = sb.ok('cleanup');
+  assert.deepEqual(names(second.removed), [b('T2'), b('integration')].sort(), JSON.stringify(second));
+  assert.deepEqual(branches(sb), ['main']);
+});
+
+test('a removed task whose merged head is not present locally keeps the integration branch', t => {
+  const sb = twoRequests(t);
+  const t1 = sb.sha(sb.repo, b('T1'));
+  forgeSays(sb, { T1: ['merged', t1], T2: ['open', b('T2')] });
+  sb.ok('cleanup');
+  // The forge now reports a head this repository never saw.
+  forgeSays(sb, { T1: ['merged', 'f'.repeat(40)], T2: ['merged', b('T2')] });
+  const r = sb.ok('cleanup');
+  assert.ok(names(r.removed).includes(b('T2')));
+  assert.equal(reasonOf(r, b('integration')), 'unconfirmed: commits on the integration branch that are in no confirmed task');
+});
+
+test('a worktree whose directory is gone does not stop its branch from being removed', t => {
+  const sb = finishedRun(t);
+  landOnMain(sb);
+  const w = sb.taskOf('T1').worktree;
+  rmSync(w, { recursive: true, force: true });
+  const dry = sb.ok('cleanup', 'dry-run');
+  assert.ok(names(dry.removable).includes(b('T1')));
+  const r = sb.ok('cleanup');
+  assert.ok(names(r.removed).includes(b('T1')), JSON.stringify(r));
+  assert.equal(r.kept.length, 0, JSON.stringify(r.kept));
+});
+
+test('a recorded request that is no http(s) URL is never passed to the forge CLI', t => {
+  const sb = finishedRun(t);
+  const L = sb.ledger();
+  L.tasks[0].pr = '--repo=evil';
+  sb.writeLedger(L);
+  const r = sb.ok('cleanup', 'dry-run');
+  assert.equal(reasonOf(r, b('T1')), 'unconfirmed: cannot read --repo=evil: the recorded request is not an http(s) URL');
+  assert.equal(sb.ghCalls().filter(c => c[1] === 'view').length, 0);
+});
+
+test('a failing forge CLI keeps the branch as unconfirmed', t => {
+  const sb = oneRequest(t);
+  sb.env.FAKE_GH_FAIL = '1';
+  const r = sb.ok('cleanup');
+  assert.match(reasonOf(r, b('T1')), /^unconfirmed: cannot read https:\/\/forge\.example\/o\/r\/pull\/1: fake-gh: failing on request$/);
+  assert.deepEqual(r.removed, []);
+});
+
+test('a task landed only on origin/<base> is confirmed through the fetch', t => {
+  const sb = finishedRun(t);
+  // Land the integration branch on origin's main from a scratch clone; local main stays behind.
+  const clone = path.join(sb.tmp, 'clone');
+  sb.git(sb.tmp, 'clone', '-q', sb.origin, clone);
+  sb.git(sb.repo, 'push', '-q', 'origin', `${b('integration')}:refs/heads/landed`);
+  sb.git(clone, 'fetch', '-q', 'origin', 'landed');
+  sb.git(clone, '-c', 'user.name=x', '-c', 'user.email=x@example.com', 'merge', '-q', '--no-ff', '-m', 'land', 'FETCH_HEAD');
+  sb.git(clone, 'push', '-q', 'origin', 'main');
+  const r = sb.ok('cleanup', 'dry-run');
+  assert.deepEqual(names(r.removable), [b('T1'), b('T2'), b('integration')].sort(), JSON.stringify(r));
+});
+
+test('a -base branch whose task is unconfirmed is kept', t => {
+  const sb = sandbox(t, { tasks: [task('T1', ['a/**']), task('T2', ['b/**']), task('T3', ['c/**'], ['T1', 'T2'])] });
+  sb.ok('prepare', 'run-one');
+  sb.complete('T1');
+  sb.complete('T2');
+  sb.complete('T3');
+  sb.ok('finish', 'finished');
+  const r = sb.ok('cleanup', 'dry-run');
+  assert.equal(reasonOf(r, b('T3-base')), `unconfirmed: not in main nor in a confirmed ${b('T3')}`);
+});
+
+test('a stale lock of another run is put back byte for byte; an unreadable one refuses cleanup', t => {
+  const sb = finishedRun(t);
+  const stale = JSON.stringify({ runId: 'old-run', at: Date.now() - 7 * 60 * 60 * 1000 }) + '\n';
+  writeFileSync(sb.lockFile, stale);
+  sb.ok('cleanup', 'dry-run');
+  assert.equal(readFileSync(sb.lockFile, 'utf8'), stale);
+
+  writeFileSync(sb.lockFile, 'not json');
+  const r = sb.run('cleanup', 'dry-run');
+  assert.equal(r.ok, false);
+  assert.equal(r.locked, true);
+  assert.equal(readFileSync(sb.lockFile, 'utf8'), 'not json');
 });

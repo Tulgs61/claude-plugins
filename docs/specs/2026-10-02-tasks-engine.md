@@ -584,20 +584,13 @@ These amendments take precedence over every earlier section and amendment where 
    `running` grows inside the loop, are unchanged. The loop keeps running while any task runs, so a
    ready task waiting for a slot starts when one frees up; the loop neither deadlocks nor ends early.
    A ledger without the field used to run every ready task at once and now runs at most 3.
-2. **Closing dry run.** After `finish` succeeds for a run with no stop reason (`finished`):
-   - with `prs` false, the engine calls `cleanup <ledger> dry-run` once, through the same serialised
-     and checked helper path as every other call, and returns `cleanup: {removable, kept}` from its
-     answer. A failed call is logged as `cleanup dry run failed: …` and gives `cleanup: null`; it
-     never changes `stopped`;
-   - with `prs` true it makes no call (every item would be `pr open` right after the requests open)
-     and returns `cleanup: 'after the PRs merge: /tasks cleanup'`.
-   A stopped run, or a refused `finish`, makes no call and returns `cleanup: null`. The engine never
-   runs a real cleanup. The dry run is the only helper call after `finish`; it is made after the
-   refresh timer is stopped, so rev 11's "no timer after the end" holds, and the rev 11 test now
-   accepts it as the last call right after `finish`.
+2. **Cleanup hint.** After `finish` succeeds for a run with no stop reason (`finished`), the result
+   carries `cleanup`: `'after the PRs merge: /tasks cleanup'` when `prs` is true, otherwise
+   `'after the integration branch is merged: /tasks cleanup'`. A stopped run, or a refused `finish`,
+   gives `cleanup: null`. The engine makes no `cleanup` call: right after a run nothing it made has
+   landed, so a dry run would keep every item. `finish` stays the last helper call.
 3. **Tests.** `tests/tasks-engine-parallel-rev14.test.mjs` holds implementers open through the
    `taskAgent` hook of `runEngine` and counts them: never more than 2 with `maxParallel: 2`, never
    more than 3 without the field, and 5 with `maxParallel: 99` (the control that shows the count
-   sees concurrency); every task still merges. It pins one `cleanup … dry-run` after `finish` for a
-   finished run without PRs, a failed dry run that is only logged, and no call for a run with PRs or
-   a stopped run.
+   sees concurrency); every task still merges. It pins the hint for finished runs with and without
+   PRs, no `cleanup` call in any run, and `cleanup: null` for a stopped run and a refused `finish`.
