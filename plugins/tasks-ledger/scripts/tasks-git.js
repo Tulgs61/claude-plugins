@@ -1557,17 +1557,28 @@ function cleanupUnderLock(ctx, dryRun) {
     if (f.status !== 0) warnings.push(`git fetch origin ${L.baseBranch} failed: ${(f.stderr || f.stdout || `exit ${exitCode(f)}`).trim()}`);
   }
   // A real run first drops registrations of worktrees whose directory is gone, so their branches
-  // can be deleted; a dry run changes nothing.
+  // can be deleted; a dry run changes nothing. Registrations are read before, so a missing worktree
+  // outside .claude/worktrees/ (an unmounted volume, say) still keeps its branch as `outside`.
+  const registered = worktrees(root);
   if (!dryRun) git(root, 'worktree', 'prune');
   const baseRefs = [`refs/heads/${L.baseBranch}`, `refs/remotes/origin/${L.baseBranch}`].filter(ref => refExists(root, ref));
   const isAncestor = (sha, ref) => git(root, 'merge-base', '--is-ancestor', sha, ref).status === 0;
   const inBase = sha => baseRefs.some(ref => isAncestor(sha, ref));
 
+  // The real path of `p`, or for a path that does not exist that of its nearest existing parent with
+  // the rest appended, so a missing worktree compares like an existing one.
   const realOrSelf = p => {
-    try {
-      return fs.realpathSync(p);
-    } catch {
-      return path.resolve(p);
+    let head = path.resolve(p);
+    const rest = [];
+    for (;;) {
+      try {
+        return path.join(fs.realpathSync(head), ...rest);
+      } catch {
+        const up = path.dirname(head);
+        if (up === head) return path.resolve(p);
+        rest.unshift(path.basename(head));
+        head = up;
+      }
     }
   };
   const worktreesDir = realOrSelf(path.join(root, '.claude', 'worktrees'));
@@ -1586,7 +1597,9 @@ function cleanupUnderLock(ctx, dryRun) {
     const kind = taskRe.test(rest) ? 'task' : baseRe.test(rest) ? 'base' : rest === 'integration' ? 'integration' : null;
     if (!kind) continue;
     const w = all.find(x => x.branch === branch && fs.existsSync(x.path));
-    const item = { branch, kind, id: kind === 'integration' ? null : rest.replace(/-base$/, ''), worktree: w ? w.path : null };
+    const gone = w ? null : registered.find(x => x.branch === branch && !fs.existsSync(x.path) && !inWorktreesDir(x.path));
+    const item = { branch, kind, id: kind === 'integration' ? null : rest.replace(/-base$/, ''), worktree: w ? w.path : gone ? gone.path : null };
+    if (gone) item.reason = 'outside';
     item.tip = gitOk(root, 'rev-parse', `refs/heads/${branch}`);
     items.push(item);
   }

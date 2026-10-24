@@ -330,3 +330,15 @@ test('a stale lock of another run is put back byte for byte; an unreadable one r
   assert.equal(r.locked, true);
   assert.equal(readFileSync(sb.lockFile, 'utf8'), 'not json');
 });
+
+test('a missing worktree outside .claude/worktrees/ keeps its branch as outside, also in a real run', t => {
+  const sb = finishedRun(t);
+  landOnMain(sb);
+  sb.git(sb.repo, 'worktree', 'remove', sb.taskOf('T1').worktree);
+  const review = path.join(sb.tmp, 'volume', 'review');
+  sb.git(sb.repo, 'worktree', 'add', '-q', review, b('T1'));
+  rmSync(path.join(sb.tmp, 'volume'), { recursive: true, force: true });
+  const r = sb.ok('cleanup');
+  assert.equal(reasonOf(r, b('T1')), 'outside');
+  assert.ok(branches(sb).includes(b('T1')));
+});
