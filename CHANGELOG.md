@@ -56,19 +56,22 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ### [0.5.1] - 2026-10-24
 
-#### Fixed
+#### Added
 
 - `approve` records an approval on native Windows. It asks in the console window it runs in (it
-  writes to `CONOUT$`, reads the answer from `CONIN$` and closes both on every path) and exits 2 at once
-  without a console instead of hanging. The gate offers a PowerShell command there: `$env:` assignments,
-  then `node`, every value in single quotes with every single-quote character doubled (also `‘` and
-  `’`). CI runs the test for it on `windows-latest`. (#8)
+  writes to `CONOUT$`, reads the answer from `CONIN$` and closes both on every path); without a console
+  it exits 2 at once and never waits. The gate offers a PowerShell command there: `$env:` assignments,
+  then `node`, every value in single quotes with every single-quote character doubled (also the
+  typographic ones such as `‘` and `’`). CI runs the test for it on `windows-latest`. (#8)
+
+#### Fixed
+
 - The verify gate asks for approval once per check directory in each session, not once per project. A
   stop in an unapproved subdirectory now shows that directory's request even after the top level was
   asked about. Session state written by older versions is still read. (#12)
 - On POSIX a backslash in a stored check directory is part of the name, not a separator: a real
-  directory named `a\..\b` can be approved and its approval is honoured. `a/../b` and `../x` are still
-  refused, and on Windows both separators still count. (#13)
+  directory named `a\..\b` can be approved and its approval is honoured. A stored `a/../b` or `../x` is
+  still ignored, and on Windows both separators still count. (#13)
 - A line another writer appended to the inbox while a carry-over write failed partway is no longer
   lost. When it is joined to the incomplete line left behind, the next `sync` reads it from the line's
   ending and drops the incomplete part. (#15)
@@ -77,15 +80,18 @@ version `<version>` is tagged `<name>--v<version>`.
 - The `T<n> started` log line names the task's title again. A task resumed as verified logs that it is
   being merged. (#19)
 - A proof or budget given as a non-string value, such as a number, counts as present again when
-  `needsAcceptance` is computed, as it did before 0.5.0. (#19)
+  `needsAcceptance` is computed, as it did before 0.5.0. (#21)
 
 #### Changed
 
-- The task listing no longer carries `resumeVerified`; nothing wrote or read it. (#21)
+- On Windows the consent store's location must be fully qualified: a drive letter followed by `\` or
+  `/`, or a UNC path. `\x`, `/x` and `C:x` leave the store unavailable. (#8)
+- The task listing no longer carries `resumeVerified`; nothing wrote or read it. (#19, #21)
 - The `tasks-git` and `tasks-engine` specs describe the 0.5.0 relay check, the `task <ledger> <id>`
-  command and the full record fetched before dispatch. The engine spec says a timer refresh counts as in
-  flight only once its helper call is made, and the timer test now checks that no `sync` is sent while
-  only verify runs. (#11, #20)
+  command and the full record fetched before dispatch. The engine spec says a lock refresh (`sync`)
+  counts as in progress only once its helper call is made, so two tasks starting together behind queued
+  helper calls may each send one `sync` for the same boundary. The timer test now checks that no `sync`
+  is sent while only verify runs. (#11, #20)
 
 ### [0.5.0] - 2026-10-17
 
