@@ -409,3 +409,29 @@ mentioned below are added to `schemas/tasks.schema.json` by the tasks-git change
 18. **Tests.** The rev4-6 test title names the dispatch branch and worktree. The cleanup sandbox test adds a
     detached worktree whose directory is `<topic>-T<n>`, which must not be collected. Plus a key-term test
     per amendment 13-17.
+
+## Amendments (rev 14)
+
+These amendments take precedence over every earlier section and amendment where they differ.
+
+1. **`/tasks cleanup`.** The tasks skill gains a `cleanup` mode. Its "Cleanup" section no longer
+   describes git and forge calls for the model to make; it runs the helper's `cleanup` (see the
+   tasks-git spec, rev 14):
+   0. the helper's lock refuses cleanup while a run holds the `.lock`; then nothing is removed, the
+      error naming the run id and age is shown, and the skill stops. A crashed run's lock blocks
+      cleanup for up to six hours; the way out is `/tasks resume` after the user confirms that run
+      is dead, and the end of that run. Cleanup never takes over a lock;
+   1. `cleanup <ledger> dry-run` collects (by checked-out branch, never by directory name; a
+      `dispatch-<slug>` worktree and the main checkout are never items);
+   2. a taken-over integration branch is left alone: when the dry run lists it as removable while
+      the user still needs it, no cleanup runs;
+   3. the removable and kept items are shown with their reasons, and nothing is removed before the
+      user agrees to that list;
+   4. `cleanup <ledger>` removes, and its `removed` and `kept` lists are reported.
+   Rev 10 amendment 3, rev 10 amendment 9 and rev 4 amendment 7 hold through the helper; their tests
+   now check the new wording, and the rev 10 amendment 9 sandbox test runs the helper's dry run.
+2. **Reporting.** The run report passes on the engine result's `cleanup` hint, or says nothing about
+   cleanup when it is `null`.
+3. **`maxParallel` in tasks-plan.** tasks-plan owns `maxParallel` on a refresh, sets it only when the
+   user asks or each worktree is heavy, and its rounds reply says how many tasks run at once: the
+   smaller of `maxParallel` (3 when absent) and the widest round.

@@ -12,7 +12,7 @@ const SCHEMA = JSON.parse(readFileSync(new URL('../schemas/tasks.schema.json', i
 // ---- minimal validator ---------------------------------------------------------------------------
 
 const ANNOTATIONS = new Set(['$schema', 'title', 'description']);
-const KEYWORDS = new Set(['type', 'enum', 'pattern', 'properties', 'required', 'additionalProperties', 'items']);
+const KEYWORDS = new Set(['type', 'enum', 'pattern', 'minimum', 'maximum', 'properties', 'required', 'additionalProperties', 'items']);
 
 // Walks the schema once and fails on a keyword this validator does not implement.
 function checkSupported(schema, where = '#') {
@@ -48,6 +48,8 @@ function validate(schema, value, at = '$') {
     }
   }
   if (schema.enum && !schema.enum.some(v => v === value)) errors.push(`${at}: ${JSON.stringify(value)} not in enum`);
+  if (schema.minimum !== undefined && typeof value === 'number' && value < schema.minimum) errors.push(`${at}: ${value} is below the minimum ${schema.minimum}`);
+  if (schema.maximum !== undefined && typeof value === 'number' && value > schema.maximum) errors.push(`${at}: ${value} is above the maximum ${schema.maximum}`);
   if (schema.pattern !== undefined && typeof value === 'string' && !new RegExp(schema.pattern, 'u').test(value)) {
     errors.push(`${at}: ${JSON.stringify(value)} does not match ${schema.pattern}`);
   }
@@ -87,7 +89,7 @@ test('the schema pins the ledger shape from the spec', () => {
   assert.notEqual(SCHEMA.additionalProperties, false, 'extra top-level keys are allowed');
   const top = SCHEMA.properties;
   assert.deepEqual(Object.keys(top).sort(), [
-    'agents', 'baseBranch', 'checkTimeoutMin', 'goal', 'integrationBranch', 'prs', 'runStatus', 'setup', 'stopReason', 'suite', 'tasks', 'topic',
+    'agents', 'baseBranch', 'checkTimeoutMin', 'goal', 'integrationBranch', 'maxParallel', 'prs', 'runStatus', 'setup', 'stopReason', 'suite', 'tasks', 'topic',
   ]);
   assert.deepEqual([...top.runStatus.enum].sort(), ['finished', 'planned', 'running', 'stopped']);
   assert.equal(top.topic.pattern, '^[a-z0-9][a-z0-9-]*$');
@@ -169,6 +171,7 @@ test('a planned ledger with every optional key is valid', () => {
     setup: 'npm ci',
     suite: 'npm test',
     checkTimeoutMin: 12.5,
+    maxParallel: 4,
     runStatus: 'planned',
     integrationBranch: null,
     stopReason: null,
@@ -220,4 +223,12 @@ test('other violations are rejected too', () => {
   const files = good();
   files.tasks[0].files = ['src/**', 7];
   assertInvalid(files, 'expected string', 'non-string file glob');
+});
+
+test('maxParallel is an integer from 1 to 16 (rev 14)', () => {
+  for (const n of [1, 3, 16]) assertValid({ ...good(), maxParallel: n }, `maxParallel ${n}`);
+  assertInvalid({ ...good(), maxParallel: 0 }, 'below the minimum', 'maxParallel 0');
+  assertInvalid({ ...good(), maxParallel: 17 }, 'above the maximum', 'maxParallel 17');
+  assertInvalid({ ...good(), maxParallel: 2.5 }, 'expected integer', 'maxParallel 2.5');
+  assertInvalid({ ...good(), maxParallel: '3' }, 'expected integer', 'maxParallel as text');
 });

@@ -159,6 +159,7 @@ test('rev4-6: the dispatch deliverable names the dispatch/<slug> branch in the d
 });
 
 // 7. Cleanup.
+// Since rev 14 the helper's `cleanup` confirms each merge and removes; the skill shows a dry run first.
 test('rev4-7: cleanup spares a taken-over integration branch and uses -D only after a confirmed merge', () => {
   const cleanup = section(TASKS, 'Cleanup');
   assert.match(cleanup, /Leave a taken-over integration branch alone/);
@@ -166,7 +167,8 @@ test('rev4-7: cleanup spares a taken-over integration branch and uses -D only af
   const sentences = cleanup.split(/(?<=\.)\s+/);
   const withD = sentences.filter(s => /branch -D/.test(s));
   assert.ok(withD.length > 0, '-D is mentioned');
-  for (const s of withD) assert.match(s, /only for a branch whose\s+merge was confirmed/, s);
-  assert.match(cleanup, /`git -C <root> branch -d <branch>`/);
-  assert.ok(cleanup.indexOf('Confirm each merge') < cleanup.indexOf('branch -D'), 'merge confirmed before removal');
+  for (const s of withD) assert.match(s, /only for a branch whose merge it confirmed/, s);
+  assert.match(cleanup, /`git worktree remove` without `--force`/);
+  assert.ok(cleanup.indexOf('cleanup "<ledger>" dry-run') < cleanup.indexOf('Remove nothing before the user agrees'), 'dry run before asking');
+  assert.ok(cleanup.indexOf('Remove nothing before the user agrees') < cleanup.indexOf('**Remove.**'), 'asked before removal');
 });

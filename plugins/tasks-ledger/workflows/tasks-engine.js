@@ -395,6 +395,9 @@ if (!prepared.ok) {
   };
 }
 
+// At most this many tasks run at once. An older helper's answer has no `maxParallel`: the default.
+const maxParallel = Number.isInteger(prepared.maxParallel) && prepared.maxParallel >= 1 ? prepared.maxParallel : 3;
+
 const tasks = new Map(); // id -> ledger task, in ledger order
 const results = [];
 let stopped = null;
@@ -729,8 +732,9 @@ phase('run tasks');
 try {
   while (!badStart && agentsError === null) {
     if (stopped === null) {
-      // `running` grows inside this loop, so two tasks that become ready together never overlap.
-      for (const t of tasks.values()) if (!running.has(t.id) && ready(t)) start(t);
+      // `running` grows inside this loop, so two tasks that become ready together never overlap, and
+      // no more than `maxParallel` start; a task waiting for a free slot starts when one frees up.
+      for (const t of tasks.values()) if (running.size < maxParallel && !running.has(t.id) && ready(t)) start(t);
     }
     if (running.size > 0) {
       await Promise.race(running.values());
@@ -791,8 +795,19 @@ if (!finished.ok) {
   stopped = oneLine(stopped === null ? why : `${stopped}; ${why}`);
 }
 
+// A finished run says when `/tasks cleanup` can remove what it left behind. Right after the run
+// nothing has landed yet (the PRs are open, or the integration branch is not merged), so a dry run
+// here would keep every item; the engine never runs cleanup itself.
+let cleanup = null;
+if (finished.ok && stopped === null) {
+  cleanup = prepared.prs === true
+    ? 'after the PRs merge: /tasks cleanup'
+    : 'after the integration branch is merged: /tasks cleanup';
+}
+
 return {
   blocked,
+  cleanup,
   integration: prepared.integration,
   ledger: ledgerPath,
   locked,

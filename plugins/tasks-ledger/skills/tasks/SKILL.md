@@ -1,7 +1,7 @@
 ---
 name: tasks
-description: Run a list of separable code changes as a tasks-ledger run - plan the ledger, show the rounds, and on the user's go start the tasks-engine workflow (an implementer per task in its own worktree, an independent reviewer, local merges, draft PRs only when asked). Also manages runs - "add <task>" joins a live run, "resume" continues a stopped one, "retry <Tn>" re-queues a blocked task, "status" shows progress.
-argument-hint: "<task list> [open PRs] | add <task> | resume | retry <Tn> | status"
+description: Run a list of separable code changes as a tasks-ledger run - plan the ledger, show the rounds, and on the user's go start the tasks-engine workflow (an implementer per task in its own worktree, an independent reviewer, local merges, draft PRs only when asked). Also manages runs - "add <task>" joins a live run, "resume" continues a stopped one, "retry <Tn>" re-queues a blocked task, "status" shows progress, "cleanup" removes the worktrees and branches of a run whose work has landed.
+argument-hint: "<task list> [open PRs] | add <task> | resume | retry <Tn> | status | cleanup"
 ---
 
 # tasks
@@ -49,6 +49,7 @@ The first word of the input decides:
 | `resume` | Resume |
 | `retry <Tn>` | Retry |
 | `status` | Status |
+| `cleanup` | Cleanup |
 | anything else | New run, from a task list; "open PRs" (or similar wording) means PRs were asked for |
 
 ## New run
@@ -219,31 +220,40 @@ When the workflow returns, read the ledger once more and tell the user:
 - **Per task**: id, status, branch and PR (or "none").
 - **Needs acceptance**: every task with `needsAcceptance` true, marked as needing an acceptance
   before `/tasks retry <Tn>` can run it.
+- **Cleanup**: when the result's `cleanup` is set (a finished run), pass on its hint: `/tasks cleanup`
+  once the PRs merge, or once the integration branch is merged. When it is `null`, say nothing about
+  cleanup.
 
 ## Cleanup
 
-Once a run's work has landed (its PRs merged, or the user took over the integration branch), offer
-to remove what the run left behind.
+`/tasks cleanup` removes what a run left behind once its work has landed (its PRs merged, or the
+integration branch merged into the base branch). The helper decides what is safe to remove; you show
+its answer and ask.
 
-0. **Check the lock.** First read the ledger's `.lock`. While it is fresh (`at` less than six hours
-   ago), the run is live: remove nothing, name the lock's run id and age, and stop.
-1. **Collect.** Use the ledger's `topic` only when it matches `^[a-z0-9][a-z0-9-]*$`; otherwise
-   collect nothing and say why. Collect the local `task/<topic>/*` branches, and the worktrees whose
-   checked-out branch is one of them: in `git -C <root> worktree list --porcelain`, a worktree
-   counts only when its `branch refs/heads/task/<topic>/…` line says so, never by its directory
-   name alone. A `dispatch-<slug>` worktree on a `dispatch/<slug>` branch is never a cleanup item,
-   whatever its directory is called.
+0. **Check the lock.** The helper takes the ledger's `.lock` for the whole call and refuses while a
+   run holds it (`locked: true`). Then remove nothing: show its error, which names the lock's run id
+   and age, and stop. A lock left by a crashed run blocks cleanup for up to six hours; the way out is
+   `/tasks resume` once the user confirms that run is dead (see "Live lock"), and the end of that
+   run. Cleanup never takes over a lock.
+1. **Collect.** Run `node "<helper>" cleanup "<ledger>" dry-run`. It changes nothing and answers
+   with `removable` items (`branch`, `worktree`) and `kept` items with a `reason`. Its items are the
+   local branches `task/<topic>/<Tn>`, `task/<topic>/<Tn>-base` and `task/<topic>/integration`, each
+   with the worktree that has it checked out: the helper reads `git worktree list --porcelain` and
+   matches a worktree on its branch, never by its directory name alone. A `dispatch-<slug>` worktree
+   on a `dispatch/<slug>` branch is never a cleanup item, and neither is the main checkout.
 2. **Leave a taken-over integration branch alone.** When the user took over the integration branch
    `task/<topic>/integration` into the project's own flow, it and its worktree
-   `<root>/.claude/worktrees/<topic>-integration` are not cleanup items. Ask when you cannot tell.
-3. **Confirm each merge.** A task branch counts as merged only when its PR is merged
-   (`gh pr view <pr> --json state` shows `MERGED`) or `git -C <root> branch --merged <baseBranch>`
-   lists it. A `task/<topic>/<Tn>-base` branch counts as merged once task `<Tn>` does. Anything
-   unconfirmed stays and is named in your report.
-4. **List and ask.** Show every item you would remove, marked as merged-confirmed. Remove nothing
-   before the user agrees to that list.
-5. **Remove.** Worktrees with `git -C <root> worktree remove <path>`. Branches with
-   `git -C <root> branch -d <branch>`; use `git -C <root> branch -D <branch>` only for a branch whose
-   merge was confirmed in step 3 (a squash merge, for example, leaves `-d` refusing).
+   `<root>/.claude/worktrees/<topic>-integration` are not cleanup items. If the dry run lists it as
+   removable while the user still needs it, run no cleanup and say why. Ask when you cannot tell.
+3. **List and ask.** Show every removable item, then every kept item with its reason (`dirty`,
+   `outside`, `pr open`, `unconfirmed: …`). Remove nothing before the user agrees to that list.
+4. **Remove.** Run `node "<helper>" cleanup "<ledger>"` and report its `removed` and `kept` lists.
+   The helper removes only what it confirmed merged: a task branch whose tip is in the base branch,
+   or whose recorded PR is merged at exactly that tip (a squash merge); a `-base` branch inside a
+   confirmed task branch; the integration branch when it is in the base branch or holds nothing but
+   confirmed task work. It runs `git worktree remove` without `--force`, so a worktree with a tracked
+   or untracked change stays (ignored files such as a local `.env` are removed with it), and
+   `git branch -D` only for a branch whose merge it confirmed. Anything that changed since
+   the dry run is judged again and may be kept.
 
 Remote branches and PRs are left alone.

@@ -49,14 +49,14 @@ test('rev10-9: tasks-plan never writes a dispatch topic, picks another slug and 
 test('rev10-9: cleanup collects worktrees by checked-out task/<topic>/ branch, never by directory name', () => {
   const collect = flat(step(section(TASKS, 'Cleanup'), 1));
   assert.match(collect, /^1\. \*\*Collect\.\*\*/);
-  assert.ok(codeSpans(collect).includes('git -C <root> worktree list --porcelain'), 'lists worktrees with their branches');
-  assert.ok(codeSpans(collect).includes('branch refs/heads/task/<topic>/…'), 'matches on the branch line');
-  assert.match(collect, /never by its directory name alone/);
+  assert.ok(codeSpans(collect).includes('git worktree list --porcelain'), 'lists worktrees with their branches');
+  assert.match(collect, /matches a worktree on its branch, never by its directory name alone/);
   assert.match(collect, /`dispatch-<slug>` worktree on a `dispatch\/<slug>` branch is never a cleanup item/);
   assert.doesNotMatch(collect, /worktrees\/<topic>-\*/, 'no collection by directory glob');
 });
 
-test('rev10-9: the documented collection keeps dispatch and foreign worktrees out of cleanup', t => {
+// Since rev 14 the collection is the helper's `cleanup`: its dry run is exercised here.
+test('rev10-9: the helper cleanup keeps dispatch and foreign worktrees out of its items', t => {
   const sb = sandbox(t, { tasks: [task('T1', ['a.txt'])] });
   const run = sb.ok('worktree', 'T1');
   const wt = name => path.join(sb.repo, '.claude', 'worktrees', name);
@@ -65,16 +65,10 @@ test('rev10-9: the documented collection keeps dispatch and foreign worktrees ou
   sb.git(sb.repo, 'worktree', 'add', '-q', '-b', 'other', wt(`${TOPIC}-T9`), 'main');
   // A detached worktree whose directory is named like a task worktree of the run.
   sb.git(sb.repo, 'worktree', 'add', '-q', '--detach', wt(`${TOPIC}-T8`), 'main');
-  const collect = step(section(TASKS, 'Cleanup'), 1);
-  const cmd = codeSpans(collect).find(s => s.includes('worktree list'));
-  const line = codeSpans(collect).find(s => s.startsWith('branch refs/heads/'));
-  const args = cmd.replaceAll('<root>', sb.repo).split(' ');
-  const listing = sb.git(sb.repo, ...args.slice(1));
-  const prefix = line.replace('<topic>', TOPIC).replace(/…$/, '');
-  const collected = listing.split(/\n\n+/)
-    .filter(entry => entry.split('\n').some(l => l.startsWith(prefix)))
-    .map(entry => entry.match(/^worktree (.*)$/m)[1]);
-  assert.deepEqual(collected.map(p => path.basename(p)), [path.basename(run.worktree)]);
+  const r = sb.ok('cleanup', 'dry-run');
+  const items = [...r.removable, ...r.kept];
+  assert.deepEqual(items.map(x => x.branch), [`task/${TOPIC}/T1`]);
+  assert.deepEqual(items.map(x => path.basename(x.worktree)), [path.basename(run.worktree)]);
 });
 
 // 10. Refresh keeps top-level keys.

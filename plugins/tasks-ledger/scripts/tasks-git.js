@@ -41,6 +41,9 @@ const OPEN_CREATE_NEW = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.consta
 const TAIL_MAX = 2000;
 const JOINED_LINE_TRIES = 64;
 const PERMANENT_BRANCHES = ['main', 'master', 'develop', 'trunk'];
+// How many tasks the engine runs at once: the ledger's `maxParallel`, else the default.
+const DEFAULT_PARALLEL = 3;
+const MAX_PARALLEL = 16;
 
 // BEGIN glob-overlap
 // Conservative overlap test for `files` globs. Each pattern is reduced to its literal prefix (the
@@ -315,6 +318,9 @@ function validateLedger(L) {
   if (L.baseBranch === undefined || L.baseBranch === null) L.baseBranch = 'main';
   if (typeof L.baseBranch !== 'string' || L.baseBranch === '' || L.baseBranch.startsWith('-') || /[\s:]/.test(L.baseBranch)) {
     fail(`unsafe ledger baseBranch ${JSON.stringify(L.baseBranch)}`);
+  }
+  if (L.maxParallel !== undefined && !(Number.isInteger(L.maxParallel) && L.maxParallel >= 1 && L.maxParallel <= MAX_PARALLEL)) {
+    fail(`invalid maxParallel ${JSON.stringify(L.maxParallel)}: expected an integer from 1 to ${MAX_PARALLEL}`);
   }
   for (const t of L.tasks) {
     if (!t || typeof t !== 'object' || typeof t.id !== 'string' || !ID_RE.test(t.id)) {
@@ -1137,7 +1143,8 @@ function opPrepare(ctx, [runId, takeover, heldRunId]) {
       // The mark is harmless once this process has exited.
     }
 
-    return { added, agents, integration, prs: ctx.L.prs === true, root, start, tasks: listing(ctx.L), warnings };
+    const maxParallel = ctx.L.maxParallel === undefined ? DEFAULT_PARALLEL : ctx.L.maxParallel;
+    return { added, agents, integration, maxParallel, prs: ctx.L.prs === true, root, start, tasks: listing(ctx.L), warnings };
   } catch (e) {
     try {
       restoreLock(ctx, lock);
@@ -1487,9 +1494,225 @@ function opPrs(ctx) {
   return { results };
 }
 
+// ---- cleanup -----------------------------------------------------------------------------------
+
+// Calls that reach a remote while cleanup holds the lock never prompt and never run unbounded.
+const CLEANUP_REMOTE_OPTS = { env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, timeout: 2 * 60 * 1000 };
+
+// The state and head sha of a request as the forge reports them: { state: 'merged' | 'open' |
+// 'closed' | ..., head }, or { error } when the CLI fails or prints something else.
+function forgeRequest(ctx, url) {
+  if (!/^https?:\/\/\S+$/.test(url)) return { error: 'the recorded request is not an http(s) URL' };
+  const gitlab = git(ctx.root, 'remote', 'get-url', 'origin').stdout.trim().includes('gitlab');
+  const cli = gitlab ? forgeCli('TASKS_GIT_GLAB', 'glab') : forgeCli('TASKS_GIT_GH', 'gh');
+  const args = gitlab ? ['mr', 'view', url, '-F', 'json'] : ['pr', 'view', url, '--json', 'state,headRefOid'];
+  const r = run(cli.program, [...cli.lead, ...args], ctx.root, CLEANUP_REMOTE_OPTS);
+  if (r.status !== 0) return { error: (r.stderr || r.stdout || String(r.error || '')).trim() || `exit ${exitCode(r)}` };
+  try {
+    const o = JSON.parse(r.stdout);
+    const state = String(o.state).toLowerCase();
+    return { state: state === 'opened' ? 'open' : state, head: gitlab ? o.sha : o.headRefOid };
+  } catch {
+    return { error: 'unreadable answer' };
+  }
+}
+
+// cleanup [dry-run]: removes the worktrees and local branches of this ledger's topic whose work is
+// confirmed merged, and keeps every other one with a reason. It holds the run lock throughout (no
+// takeover), never writes the ledger and never touches remote branches or requests.
+function opCleanup(ctx, [mode]) {
+  if (mode !== undefined && mode !== 'dry-run') fail(`bad cleanup mode ${JSON.stringify(mode)}: expected dry-run or nothing`);
+  const dryRun = mode === 'dry-run';
+  const lock = acquireLock(ctx, `cleanup-${process.pid}-${Date.now()}`, false);
+  let result;
+  try {
+    result = cleanupUnderLock(ctx, dryRun);
+  } catch (e) {
+    try {
+      restoreLock(ctx, lock);
+    } catch {
+      // The original error is what the caller needs to see.
+    }
+    throw e;
+  }
+  // What was removed is already gone, so a failed restore is reported with the answer, not instead.
+  try {
+    restoreLock(ctx, lock);
+  } catch (e) {
+    const why = e instanceof Failure ? e.message : systemError(e);
+    result.warnings = [...(result.warnings || []), `could not restore the run lock ${ctx.lockFile}: ${why}`];
+  }
+  return result;
+}
+
+function cleanupUnderLock(ctx, dryRun) {
+  const { root, L } = ctx;
+  const warnings = [];
+  const prefix = `task/${L.topic}/`;
+  const taskRe = /^(T[0-9]+)$/;
+  const baseRe = /^(T[0-9]+)-base$/;
+
+  if (git(root, 'remote', 'get-url', 'origin').status === 0) {
+    const f = run('git', ['fetch', '-q', 'origin', L.baseBranch], root, CLEANUP_REMOTE_OPTS);
+    if (f.status !== 0) warnings.push(`git fetch origin ${L.baseBranch} failed: ${(f.stderr || f.stdout || `exit ${exitCode(f)}`).trim()}`);
+  }
+  const baseRefs = [`refs/heads/${L.baseBranch}`, `refs/remotes/origin/${L.baseBranch}`].filter(ref => refExists(root, ref));
+  const isAncestor = (sha, ref) => git(root, 'merge-base', '--is-ancestor', sha, ref).status === 0;
+  const inBase = sha => baseRefs.some(ref => isAncestor(sha, ref));
+
+  // The real path of `p`, or for a path that does not exist that of its nearest existing parent with
+  // the rest appended, so a missing worktree compares like an existing one.
+  const realOrSelf = p => {
+    let head = path.resolve(p);
+    const rest = [];
+    for (;;) {
+      try {
+        return path.join(fs.realpathSync(head), ...rest);
+      } catch {
+        const up = path.dirname(head);
+        if (up === head) return path.resolve(p);
+        rest.unshift(path.basename(head));
+        head = up;
+      }
+    }
+  };
+  const worktreesDir = realOrSelf(path.join(root, '.claude', 'worktrees'));
+  const inWorktreesDir = p => {
+    const rel = path.relative(worktreesDir, realOrSelf(p));
+    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+  };
+  // Every registered worktree, its directory present or not. Cleanup never prunes: a registration
+  // whose directory is gone stays an item's worktree, inside .claude/worktrees/ to be removed with
+  // it, outside (an unmounted volume, say) to be kept with its branch.
+  const all = worktrees(root);
+  const mainPath = all.length ? all[0].path : null;
+
+  // Every item: a local branch of this topic in one of the three forms, with its worktree.
+  const names = gitOk(root, 'for-each-ref', '--format=%(refname:short)', `refs/heads/${prefix}`).split('\n').filter(Boolean);
+  const items = [];
+  for (const branch of names) {
+    const rest = branch.slice(prefix.length);
+    const kind = taskRe.test(rest) ? 'task' : baseRe.test(rest) ? 'base' : rest === 'integration' ? 'integration' : null;
+    if (!kind) continue;
+    const w = all.find(x => x.branch === branch && fs.existsSync(x.path)) || all.find(x => x.branch === branch);
+    const item = { branch, kind, id: kind === 'integration' ? null : rest.replace(/-base$/, ''), worktree: w ? w.path : null };
+    item.tip = gitOk(root, 'rev-parse', `refs/heads/${branch}`);
+    items.push(item);
+  }
+
+  // Worktree safety comes first, whatever the merge state.
+  for (const item of items) {
+    if (item.worktree === null) continue;
+    if (item.worktree === mainPath || !inWorktreesDir(item.worktree)) {
+      item.reason = 'outside';
+      continue;
+    }
+    // A missing worktree inside .claude/worktrees/ holds nothing to lose; `git worktree remove`
+    // drops its registration.
+    if (!fs.existsSync(item.worktree)) continue;
+    const st = git(item.worktree, 'status', '--porcelain', '--untracked-files=all');
+    if (st.status !== 0) item.reason = `dirty: git status failed: ${(st.stderr || st.stdout).trim()}`;
+    else if (st.stdout.trim() !== '') item.reason = 'dirty';
+  }
+
+  const requests = new Map(); // pr -> forge answer, so each request is asked about once
+  const requestOf = pr => {
+    if (!requests.has(pr)) requests.set(pr, forgeRequest(ctx, pr));
+    return requests.get(pr);
+  };
+  const prOf = id => {
+    const t = L.tasks.find(x => x.id === id);
+    return t && typeof t.pr === 'string' && t.pr ? t.pr : null;
+  };
+
+  // Task branches: (a) the tip is in the base, or (b) the request is merged at exactly this tip.
+  const confirmed = new Set();
+  for (const item of items.filter(x => x.kind === 'task')) {
+    let why = null;
+    if (!inBase(item.tip)) {
+      const pr = prOf(item.id);
+      if (!pr) {
+        why = `unconfirmed: not in ${L.baseBranch} and no request recorded`;
+      } else {
+        const req = requestOf(pr);
+        if (req.error) why = `unconfirmed: cannot read ${pr}: ${req.error}`;
+        else if (req.state === 'open') why = 'pr open';
+        else if (req.state !== 'merged') why = `unconfirmed: ${pr} is ${req.state}, not merged`;
+        else if (req.head !== item.tip) {
+          why = typeof req.head === 'string' && /^[0-9a-f]{40}$/.test(req.head) && isAncestor(req.head, item.tip)
+            ? 'unconfirmed: local commits after the merge'
+            : 'unconfirmed: the local tip is not the merged head';
+        }
+      }
+    }
+    if (why === null) confirmed.add(item.branch);
+    if (!item.reason && why) item.reason = why;
+  }
+
+  // A -base branch: in the base, or contained in its task's confirmed tip.
+  for (const item of items.filter(x => x.kind === 'base')) {
+    if (inBase(item.tip)) continue;
+    const owner = items.find(x => x.kind === 'task' && x.id === item.id);
+    const ok = owner && confirmed.has(owner.branch) && isAncestor(item.tip, owner.tip);
+    if (!ok && !item.reason) item.reason = `unconfirmed: not in ${L.baseBranch} nor in a confirmed ${prefix}${item.id}`;
+  }
+
+  // The integration branch: in the base, or every task branch left is confirmed and every commit on
+  // it that is no merge is in the base, in a confirmed task tip, or in the merged head of a ledger
+  // task's request. The merged heads cover tasks whose squash-merged branch an earlier cleanup
+  // already removed; a head not present locally covers nothing.
+  for (const item of items.filter(x => x.kind === 'integration')) {
+    if (inBase(item.tip)) continue;
+    const tasks = items.filter(x => x.kind === 'task');
+    const allConfirmed = tasks.every(x => confirmed.has(x.branch));
+    let own = '';
+    if (allConfirmed) {
+      const heads = [];
+      for (const t of L.tasks) {
+        if (typeof t.id !== 'string' || items.some(x => x.kind === 'task' && x.id === t.id)) continue;
+        const pr = prOf(t.id);
+        if (!pr) continue;
+        const req = requestOf(pr);
+        if (req.state !== 'merged' || typeof req.head !== 'string' || !/^[0-9a-f]{40}$/.test(req.head)) continue;
+        if (git(root, 'cat-file', '-e', `${req.head}^{commit}`).status === 0) heads.push(req.head);
+      }
+      own = gitOk(root, 'rev-list', '--no-merges', `refs/heads/${item.branch}`, '--not', ...tasks.map(x => x.tip), ...heads, ...baseRefs);
+    }
+    if ((!allConfirmed || own !== '') && !item.reason) {
+      item.reason = allConfirmed
+        ? 'unconfirmed: commits on the integration branch that are in no confirmed task'
+        : 'unconfirmed: not every task branch is confirmed';
+    }
+  }
+
+  const view = x => ({ branch: x.branch, worktree: x.worktree });
+  const removable = items.filter(x => !x.reason).map(view);
+  const removed = [];
+  const kept = items.filter(x => x.reason).map(x => ({ ...view(x), reason: x.reason }));
+  if (!dryRun) {
+    for (const item of items.filter(x => !x.reason)) {
+      if (item.worktree !== null) {
+        const r = git(root, 'worktree', 'remove', item.worktree);
+        if (r.status !== 0) {
+          kept.push({ ...view(item), reason: `remove failed: ${(r.stderr || r.stdout).trim()}` });
+          continue;
+        }
+      }
+      const d = git(root, 'branch', '-D', item.branch);
+      if (d.status !== 0) {
+        kept.push({ branch: item.branch, worktree: null, reason: `remove failed: ${(d.stderr || d.stdout).trim()}` });
+        continue;
+      }
+      removed.push(view(item));
+    }
+  }
+  return { dryRun, removable, removed, kept, ...(warnings.length ? { warnings } : {}) };
+}
+
 // ---- main --------------------------------------------------------------------------------------
 
 const COMMANDS = {
+  cleanup: opCleanup,
   finish: opFinish,
   merge: opMerge,
   prepare: opPrepare,

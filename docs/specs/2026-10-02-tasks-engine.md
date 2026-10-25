@@ -573,3 +573,24 @@ These amendments take precedence over every earlier section and amendment where 
        callback's and the heartbeat's own) are removed;
      - two tasks reach a boundary together while due, with no helper call queued ahead of their
        refreshes: exactly one `sync` is sent for that boundary.
+
+## Amendments (rev 14)
+
+These amendments take precedence over every earlier section and amendment where they differ.
+
+1. **Slot cap.** The engine reads `maxParallel` from `prepare`'s answer; an answer without an integer
+   of at least 1 there (an older helper) means 3. In the main loop a ready task starts only while
+   fewer than `maxParallel` tasks are running, in ledger order. The overlap check, and the rule that
+   `running` grows inside the loop, are unchanged. The loop keeps running while any task runs, so a
+   ready task waiting for a slot starts when one frees up; the loop neither deadlocks nor ends early.
+   A ledger without the field used to run every ready task at once and now runs at most 3.
+2. **Cleanup hint.** After `finish` succeeds for a run with no stop reason (`finished`), the result
+   carries `cleanup`: `'after the PRs merge: /tasks cleanup'` when `prs` is true, otherwise
+   `'after the integration branch is merged: /tasks cleanup'`. A stopped run, or a refused `finish`,
+   gives `cleanup: null`. The engine makes no `cleanup` call: right after a run nothing it made has
+   landed, so a dry run would keep every item. `finish` stays the last helper call.
+3. **Tests.** `tests/tasks-engine-parallel-rev14.test.mjs` holds implementers open through the
+   `taskAgent` hook of `runEngine` and counts them: never more than 2 with `maxParallel: 2`, never
+   more than 3 without the field, and 5 with `maxParallel: 99` (the control that shows the count
+   sees concurrency); every task still merges. It pins the hint for finished runs with and without
+   PRs, no `cleanup` call in any run, and `cleanup: null` for a stopped run and a refused `finish`.

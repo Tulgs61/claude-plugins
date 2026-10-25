@@ -58,13 +58,15 @@ export function fakeRelay() {
 const ENGINE = fileURLToPath(new URL('../../workflows/tasks-engine.js', import.meta.url));
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const body = readFileSync(ENGINE, 'utf8').replace(/^export\s+/m, '');
-const GOOD_REVIEW = { verdict: 'verified', acceptance_met: true, scope_ok: true, constraints_ok: true, findings: [], evidence: 'ok' };
+export const GOOD_REVIEW = { verdict: 'verified', acceptance_met: true, scope_ok: true, constraints_ok: true, findings: [], evidence: 'ok' };
 
 // Runs the engine against a fake helper. `records` are the ledger tasks: prepare lists their summary
 // and `task <id>` returns the record. `answers` overrides the payload per subcommand (a function of
 // the parts after the ledger path and of the call count). `relay(op, n, line)` turns the sealed
 // answer line of the n-th call of `op` into the stdout the ops agent hands back (default: as is).
-export async function runEngine(records, { answers = {}, relay = (_op, _n, line) => line } = {}) {
+// `taskAgent(prompt, options)`, when given, answers every implementer and reviewer call instead of
+// the canned answers, so a test can hold agents open and count them.
+export async function runEngine(records, { answers = {}, relay = (_op, _n, line) => line, taskAgent } = {}) {
   const run = new AsyncFunction('args', 'agent', 'phase', 'log', body);
   const opsLines = [];
   const prompts = [];
@@ -84,6 +86,7 @@ export async function runEngine(records, { answers = {}, relay = (_op, _n, line)
   const agent = async (prompt, options) => {
     if (options.agentType !== undefined) {
       prompts.push(prompt);
+      if (taskAgent) return taskAgent(prompt, options);
       return /^TASK: /.test(prompt) ? 'done' : GOOD_REVIEW;
     }
     const line = prompt.match(/node "[^"]*" (.*)\n/)[1];

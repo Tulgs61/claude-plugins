@@ -15,7 +15,7 @@ import { readFileSync } from 'node:fs';
 import { ENGINE, SCRIPT } from './helpers/git-sandbox.mjs';
 import { sealed } from './helpers/relay.mjs';
 
-const HELPER_COMMANDS = ['finish', 'merge', 'prepare', 'prs', 'status', 'sync', 'task', 'verify', 'worktree'];
+const HELPER_COMMANDS = ['cleanup', 'finish', 'merge', 'prepare', 'prs', 'status', 'sync', 'task', 'verify', 'worktree'];
 const ENGINE_ARGS = ['implementerAgent', 'ledger', 'reviewerAgent', 'runId', 'script', 'takeover'];
 const SKILLS = ['dispatch', 'tasks', 'tasks-plan'];
 
