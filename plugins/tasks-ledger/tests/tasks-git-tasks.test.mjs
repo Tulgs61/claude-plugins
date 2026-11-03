@@ -14,7 +14,16 @@ test('worktree: a task without prerequisites branches from origin/<baseBranch>',
   const sb = sandbox(t, { tasks: [task('T1')] });
   sb.ok('prepare', 'run-one');
   const w = sb.ok('worktree', 'T1');
-  assert.deepEqual(w, { ok: true, id: 'T1', branch: `task/${TOPIC}/T1`, base: 'main', worktree: wtPath(sb, 'T1') });
+  assert.deepEqual(w, {
+    ok: true,
+    id: 'T1',
+    branch: `task/${TOPIC}/T1`,
+    base: 'main',
+    worktree: wtPath(sb, 'T1'),
+    commits: 0,
+    head: sb.sha(sb.repo, 'origin/main'),
+    reviewedHead: null,
+  });
   assert.equal(sb.git(w.worktree, 'branch', '--show-current'), `task/${TOPIC}/T1`);
   assert.equal(sb.sha(w.worktree, 'HEAD'), sb.sha(sb.repo, 'origin/main'));
   const T1 = sb.taskOf('T1');
@@ -63,7 +72,7 @@ test('worktree: two prerequisites are combined in task/<topic>/<id>-base; a reru
   const worktreesBefore = sb.git(sb.repo, 'worktree', 'list', '--porcelain');
   const baseBefore = sb.sha(sb.repo, base);
   const again = sb.ok('worktree', 'T3');
-  assert.deepEqual(again, w);
+  assert.deepEqual(again, { ...w, commits: 1, head }, 'the same place, now with the started work');
   assert.equal(sb.sha(w.worktree, 'HEAD'), head);
   assert.equal(sb.sha(sb.repo, base), baseBefore);
   assert.equal(sb.git(sb.repo, 'worktree', 'list', '--porcelain'), worktreesBefore);
@@ -74,7 +83,7 @@ test('worktree: rerun for a task without prerequisites reuses the worktree', t =
   sb.ok('prepare', 'run-one');
   const w = sb.ok('worktree', 'T1');
   const head = sb.commit(w.worktree, 'a.txt', 'a\n');
-  assert.deepEqual(sb.ok('worktree', 'T1'), w);
+  assert.deepEqual(sb.ok('worktree', 'T1'), { ...w, commits: 1, head }, 'the same place, now with the started work');
   assert.equal(sb.sha(w.worktree, 'HEAD'), head);
 });
 

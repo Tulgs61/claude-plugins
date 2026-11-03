@@ -1011,13 +1011,18 @@ function opFinish(ctx, [runStatus, reason, runId]) {
   return { runStatus, tasks: listing(ctx.L) };
 }
 
-function opStatus(ctx, [id, status, evidence]) {
+// status <id> <status> [evidence] [reviewed]: `reviewed` (with `blocked`) records the head of the
+// task branch a review judged, so a restart of that unchanged head is not sent straight back to review.
+function opStatus(ctx, [id, status, evidence, flag]) {
   findTask(ctx, id);
   if (!SETTABLE.includes(status)) fail(`status ${status} not settable: expected one of ${SETTABLE.join(', ')}`);
+  if (flag !== undefined && !(flag === 'reviewed' && status === 'blocked')) fail(`bad flag ${flag}: only blocked takes reviewed`);
+  const head = flag === 'reviewed' ? git(ctx.root, 'rev-parse', '-q', '--verify', `refs/heads/${taskBranch(ctx, id)}`) : null;
   updateLedger(ctx, () => {
     const t = findTask(ctx, id);
     t.status = status;
     if (evidence !== undefined) t.evidence = String(evidence).slice(0, EVIDENCE_MAX);
+    if (head && head.status === 0) t.reviewedHead = head.stdout.trim();
   });
   return { id, status };
 }
@@ -1221,7 +1226,13 @@ function opWorktree(ctx, [id]) {
   }
 
   updateLedger(ctx, () => Object.assign(findTask(ctx, id), { status: 'in_progress', branch, base, worktree }));
-  return { id, branch, base, worktree };
+  // What a restarted task already has: its commits beyond the base, its head, and the head the last
+  // blocking review judged. The engine verifies an unreviewed branch before it starts an implementer.
+  const counted = git(worktree, 'rev-list', '--count', `${baseRefOf(ctx, t)}..HEAD`);
+  const commits = counted.status === 0 ? Number(counted.stdout.trim()) : 0;
+  const head = git(worktree, 'rev-parse', 'HEAD').stdout.trim();
+  const reviewedHead = typeof t.reviewedHead === 'string' ? t.reviewedHead : null;
+  return { id, branch, base, worktree, commits, head, reviewedHead };
 }
 
 function taskWorktree(ctx, t) {
@@ -1339,6 +1350,12 @@ function opMerge(ctx, [id]) {
     return { id, sha, already: true };
   }
 
+  // A merge an earlier call left half done (its process was killed) is undone first: the integration
+  // branch belongs to the run, and its HEAD is the last merge that completed.
+  if (git(integration, 'rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0) {
+    git(integration, 'merge', '--abort');
+    git(integration, 'reset', '-q', '--hard', 'HEAD');
+  }
   if (gitOk(integration, 'status', '--porcelain', '--untracked-files=no')) {
     fail(`integration worktree ${integration} has uncommitted changes to tracked files`);
   }

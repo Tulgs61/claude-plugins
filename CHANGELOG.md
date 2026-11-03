@@ -54,6 +54,34 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ## tasks-ledger
 
+### [0.7.0] - 2026-11-03
+
+#### Added
+
+- `scripts/ops-detach.js` runs `verify` and `merge` detached and lets the ops agent wait for them in
+  slices of at most 9 minutes. A repository check that takes longer than the Bash tool's 10-minute
+  foreground limit no longer gets killed half-way through a merge. A second `start` while the first
+  run is still alive starts nothing, so a retried ops agent never runs a merge twice at once.
+- `worktree` also answers `commits` (beyond the base), `head` and `reviewedHead`. A restarted task
+  whose branch already has commits that no review has judged is verified first. When that passes,
+  the task goes straight to review and no implementer runs. When it fails, the implementer starts with
+  that failure as its previous attempt.
+- `status <id> blocked <evidence> reviewed` records the branch head a blocking review judged
+  (`reviewedHead`, new optional ledger field). A restart of that unchanged head goes to the implementer
+  again, never straight back to review.
+
+#### Changed
+
+- Ops agents run on `haiku` at low effort. Only the third and last attempt of a call inherits the
+  session model, in case the small model keeps altering the copy.
+- A merge that failed for a passing reason (no answer from the helper, for example) is run once more.
+  A conflict, a failed combined check, untracked files in the way, or an answer the relay keeps
+  altering is not retried.
+- `merge` first undoes a merge an earlier call left half done (`MERGE_HEAD` present) in the
+  integration worktree. Other uncommitted changes there are still refused.
+- Worktree paths that the helper reports as Windows drive paths with backslashes (`C:\…`) are
+  converted to forward slashes. A backslash anywhere else still makes the path unsafe.
+
 ### [0.6.0] - 2026-10-24
 
 #### Added

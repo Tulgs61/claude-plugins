@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ENGINE, task } from './helpers/git-sandbox.mjs';
-import { fakeRelay } from './helpers/relay.mjs';
+import { fakeRelay, opsCommand } from './helpers/relay.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const body = readFileSync(ENGINE, 'utf8').replace(/^export\s+/m, '');
@@ -35,7 +35,7 @@ async function runEngine(ledgerTasks, { answers = {}, start = 'abc123', runId = 
       return /^TASK: /.test(prompt) ? 'done' : GOOD_REVIEW;
     }
     prompts.push(prompt);
-    const line = prompt.match(/node "[^"]*" (.*)\n/)[1];
+    const line = opsCommand(prompt);
     opsLines.push(line);
     const [op, , ...rest] = line.replace(/"/g, '').split(' ');
     return reply(op, rest[0], canned[op] ? canned[op](...rest) : { ok: true });
@@ -148,7 +148,7 @@ test('amendment 2: the finish helper call keeps the pinned ops form', async () =
     assert.match(p, /\nnode "\/tmp\/tasks-git\.js" finish "\/tmp\/ledger\.json" (finished|stopped) .* test1\n/);
     assert.equal(p.indexOf('node "'), p.lastIndexOf('node "'), p);
     // With quotes removed and split on spaces, the parts are subcommand, ledger path, status, ..., run id.
-    const parts = p.match(/node "[^"]*" (.*)\n/)[1].replace(/"/g, '').split(' ');
+    const parts = opsCommand(p).replace(/"/g, '').split(' ');
     assert.deepEqual(parts.slice(0, 2), ['finish', '/tmp/ledger.json']);
     assert.equal(parts.at(-1), 'test1');
   }

@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import vm from 'node:vm';
-import { fakeRelay } from './helpers/relay.mjs';
+import { fakeRelay, opsCommand } from './helpers/relay.mjs';
 
 const ENGINE = fileURLToPath(new URL('../workflows/tasks-engine.js', import.meta.url));
 const source = readFileSync(ENGINE, 'utf8');
@@ -157,7 +157,7 @@ async function runEngine(ledgerTasks, extraArgs = {}) {
       agentTypes.reviewer.add(opts.agentType);
       return { verdict: 'verified', acceptance_met: true, scope_ok: true, constraints_ok: true, findings: [], evidence: 'ok' };
     }
-    const cmd = prompt.match(/node "[^"]*" (.*)\n/)[1].replace(/"/g, '');
+    const cmd = opsCommand(prompt).replace(/"/g, '');
     return reply(cmd.split(' ')[0], cmd.split(' ')[2], answer(cmd));
   };
   const engineArgs = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId: 'test1', ...extraArgs };

@@ -49,6 +49,11 @@ the check counts as a failed attempt, and the command is run again, up to 3 time
 call fails with `helper answer was altered in transit`. A changed answer is never used, even an
 `ok: false` one. Whitespace around the JSON values does not count as a change.
 
+Ops agents only run a command and copy its line, so they run on `haiku` at low effort. The third and
+last attempt of a call inherits the session model. `verify` and `merge` run the repository's check,
+which can take longer than the Bash tool's 10-minute limit. They run detached through
+`scripts/ops-detach.js`, and the ops agent waits for them in slices of at most 9 minutes.
+
 The helper also keeps answers short, since long answers are the ones relays tend to abridge. `prepare`,
 `sync` and `finish` list only each task's scheduling fields (`id`, `status`, `dependsOn`, `files`,
 `branch`, `base`, `worktree`, `pr` and `needsAcceptance`). Right before a task is dispatched, the
@@ -152,6 +157,7 @@ agents/                      task-implementer, reviewer
 hooks/                       hooks.json, dispatch-guard.js, verify-gate.js
 workflows/tasks-engine.js    the workflow /tasks runs
 scripts/tasks-git.js         every ledger and git side effect of the workflow (one JSON line per call)
+scripts/ops-detach.js        runs verify and merge detached, waits for them in 9-minute slices
 scripts/verify-consent.js    approve, list and revoke verify.cmd approvals
 schemas/tasks.schema.json    ledger schema
 rules/conventions.md         conventions the skills, agents and hooks follow

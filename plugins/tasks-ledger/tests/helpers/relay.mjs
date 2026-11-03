@@ -53,6 +53,14 @@ export function fakeRelay() {
   };
 }
 
+// The helper command line an ops prompt runs (`verify "<ledger>" T1`), from either prompt form: the
+// plain one (`node "<script>" <command>`) or the detached one for long commands
+// (`node "<ops-detach.js>" start "<out>" "<script>" <command>`).
+export function opsCommand(prompt) {
+  const detached = prompt.match(/node "[^"]*" start "[^"]*" "[^"]*" (.*)\n/);
+  return detached ? detached[1] : prompt.match(/node "[^"]*" (.*)\n/)[1];
+}
+
 // The engine run against a fake helper, shared by the relay tests. The engine path is resolved here,
 // not imported from git-sandbox.mjs, which imports this file.
 const ENGINE = fileURLToPath(new URL('../../workflows/tasks-engine.js', import.meta.url));
@@ -89,14 +97,16 @@ export async function runEngine(records, { answers = {}, relay = (_op, _n, line)
       if (taskAgent) return taskAgent(prompt, options);
       return /^TASK: /.test(prompt) ? 'done' : GOOD_REVIEW;
     }
-    const line = prompt.match(/node "[^"]*" (.*)\n/)[1];
+    const line = opsCommand(prompt);
     opsLines.push(line);
     const [op, , ...rest] = line.replace(/"/g, '').split(' ');
     counts[op] = (counts[op] || 0) + 1;
+    opsCalls.push({ op, prompt, options });
     const payload = canned[op] ? canned[op](...rest, counts[op]) : { ok: true };
     return { stdout: relay(op, counts[op], sealed(payload), payload) };
   };
+  const opsCalls = [];
   const args = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId: 'test1' };
   const result = await run(args, agent, () => {}, message => logs.push(message));
-  return { result, opsLines, prompts, logs, counts };
+  return { result, opsLines, opsCalls, prompts, logs, counts };
 }

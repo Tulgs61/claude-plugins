@@ -42,9 +42,9 @@ test('amendment 7: prepare fails with invalid task id before taking the lock', t
   }
 });
 
-test('amendment 7: the schema has the 15 task keys and the agents object', () => {
+test('amendment 7: the schema has the 16 task keys and the agents object', () => {
   const t = SCHEMA.properties.tasks.items;
-  assert.equal(Object.keys(t.properties).length, 15);
+  assert.equal(Object.keys(t.properties).length, 16);
   assert.equal(t.properties.needsAcceptance.type, 'boolean');
   const agents = SCHEMA.properties.agents;
   assert.equal(agents.type, 'object');

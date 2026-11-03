@@ -98,7 +98,7 @@ test('the schema pins the ledger shape from the spec', () => {
   assert.equal(t.additionalProperties, false);
   assert.deepEqual([...t.required].sort(), ['acceptance', 'dependsOn', 'files', 'id', 'status', 'title']);
   assert.deepEqual(Object.keys(t.properties).sort(), [
-    'acceptance', 'base', 'branch', 'budget', 'constraints', 'dependsOn', 'evidence', 'files', 'id', 'needsAcceptance', 'pr', 'proof', 'status', 'title', 'worktree',
+    'acceptance', 'base', 'branch', 'budget', 'constraints', 'dependsOn', 'evidence', 'files', 'id', 'needsAcceptance', 'pr', 'proof', 'reviewedHead', 'status', 'title', 'worktree',
   ]);
   assert.equal(t.properties.id.pattern, '^T[0-9]+$');
   assert.equal(t.properties.dependsOn.items.pattern, '^T[0-9]+$');

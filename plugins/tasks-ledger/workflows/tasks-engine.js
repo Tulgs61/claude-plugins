@@ -16,6 +16,15 @@ const AGENT_NAME = /^[A-Za-z0-9:_-]+$/;
 const RUN_ID = /^[A-Za-z0-9-]{4,64}$/;
 const TASK_ID = /^T[0-9]+$/;
 const OPS_ATTEMPTS = 3;
+// Ops agents only run one command and copy its answer line back, so they run on a small model at low
+// effort; the last attempt inherits the session model in case the small one keeps altering the copy.
+const OPS_MODEL = 'haiku';
+const OPS_EFFORT = 'low';
+// `verify` and `merge` run the repo's verify command (often 30+ minutes), longer than the Bash tool's
+// 10-minute foreground limit, which killed merges half-way. A background Bash job does not help: a
+// workflow agent cannot wait for its notification. So these run detached through ops-detach.js (next
+// to the helper script), and the ops agent waits for them in slices shorter than the limit.
+const LONG_OPS = new Set(['verify', 'merge']);
 // Values the helper hands back before they go into prompts and command lines.
 const GIT_REF = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/;
 // Everything bash still expands inside double quotes, plus control characters (C0, DEL, C1) and the
@@ -79,8 +88,12 @@ function quoteText(text, max = 600) {
 }
 
 const isGitRef = value => typeof value === 'string' && GIT_REF.test(value);
+// A Windows drive path (`C:/...`) counts as absolute too: that is what git reports for worktrees there.
 const isSafePath = value =>
-  typeof value === 'string' && value.startsWith('/') && !UNSAFE_PATH.test(value) && !OTHER_SPACE.test(value);
+  typeof value === 'string' &&
+  (value.startsWith('/') || /^[A-Za-z]:\//.test(value)) &&
+  !UNSAFE_PATH.test(value) &&
+  !OTHER_SPACE.test(value);
 
 // The first `max` UTF-16 units of `value`, moved back before a surrogate pair the cut would split.
 function cut(value, max) {
@@ -106,7 +119,40 @@ const OPS_SCHEMA = {
   additionalProperties: false,
 };
 
+const detachPath = `${scriptPath.replace(/\/[^/]*$/, '')}/ops-detach.js`;
+
+// The file a detached command writes its output to: next to the ledger, one per command and task.
+function detachedOut(command) {
+  const [name, , id] = command.split(' ');
+  return `${ledgerPath.replace(/\.json$/, '')}.ops-${name}-${String(id || 'run').replace(/[^A-Za-z0-9_-]/g, '')}.out`;
+}
+
 function opsPrompt(command) {
+  if (LONG_OPS.has(command.split(' ')[0])) {
+    const out = detachedOut(command);
+    return [
+      'You run one long shell command for an automated workflow and report its output.',
+      '',
+      'It can take up to two hours, longer than the Bash tool allows, so it runs detached. Step 1: run this',
+      'once, in the foreground, with the Bash tool, exactly as written (it prints STARTED or RUNNING and',
+      'returns at once):',
+      '',
+      `node "${detachPath}" start "${out}" "${scriptPath}" ${command}`,
+      '',
+      'Step 2: run this in the foreground with the Bash tool and a timeout of 600000 ms, exactly as written.',
+      'It waits up to 9 minutes. While it prints only PENDING, run it again, as often as needed (that is',
+      'expected, not a failure). Never use run_in_background, never run step 1 twice, never run any other',
+      'command, and do not try to fix anything the output reports:',
+      '',
+      `node "${detachPath}" wait "${out}"`,
+      '',
+      'Answer with `stdout` set to the complete output of the last step 2 run (the one that did not print',
+      'just PENDING), copied verbatim, character for character, however long it is. Do not summarise,',
+      'shorten, abridge or truncate it; do not reformat, pretty-print, re-indent or reorder it; do not drop,',
+      'rename or add any field; do not add any comment or explanation. Its JSON line ends with a check over',
+      'its content (`len` and `sum`): the workflow rejects any copy that differs and runs the command again.',
+    ].join('\n');
+  }
   return [
     'You run exactly one shell command for an automated workflow and report its output.',
     '',
@@ -203,7 +249,8 @@ async function runOps(command) {
   for (let attempt = 1; attempt <= OPS_ATTEMPTS; attempt++) {
     let result;
     try {
-      result = await agent(opsPrompt(command), { schema: OPS_SCHEMA });
+      const small = attempt < OPS_ATTEMPTS ? { model: OPS_MODEL, effort: OPS_EFFORT } : {};
+      result = await agent(opsPrompt(command), { schema: OPS_SCHEMA, ...small });
     } catch (error) {
       result = null;
       log(`helper call failed (${name}): ${error && error.message}`);
@@ -480,16 +527,29 @@ function finishTask(t, status, note, failure = true) {
   if (failure && status !== 'merged' && stopped === null) stopped = `${t.id} ${status}: ${note}`;
 }
 
-async function block(t, note, failure = true) {
+// `reviewed`: a review blocked the task, so the helper records the branch head it judged; a restart
+// of that unchanged head goes to the implementer, never straight back to review.
+async function block(t, note, failure = true, reviewed = false) {
   if (TASK_ID.test(t.id)) {
-    const answer = await ops('status', t.id, 'blocked', quoteText(note));
+    const answer = await ops('status', t.id, 'blocked', quoteText(note), ...(reviewed ? ['reviewed'] : []));
     if (!answer.ok) note = `${note} (ledger not updated: ${answer.error || 'no answer'})`;
   }
   finishTask(t, 'blocked', note, failure);
 }
 
+// A merge that failed for a passing reason (no answer from the helper, a merge an earlier call left
+// half done) is run once more: a repeated merge is safe. A conflict, a failed combined check, files
+// in the way or a relay that keeps altering answers fail again the same way, so they are not retried.
+const mergeRetryable = answer =>
+  !answer.conflicts &&
+  !/combined check failed|untracked files|conflicts with|altered in transit/.test(String(answer.error || ''));
+
 async function merge(t) {
-  const merged = await ops('merge', t.id);
+  let merged = await ops('merge', t.id);
+  if (!merged.ok && mergeRetryable(merged)) {
+    log(`${t.id}: merge failed (${merged.error || 'unknown error'}); trying once more`);
+    merged = await ops('merge', t.id);
+  }
   if (!merged.ok) return block(t, `merge failed: ${merged.error || 'unknown error'}`);
   finishTask(t, 'merged', `merged @ ${merged.sha || '?'}`);
 }
@@ -533,15 +593,38 @@ async function driveTask(t) {
 
   const place = await ops('worktree', t.id);
   if (!place.ok) return block(t, `worktree failed: ${place.error || 'unknown error'}`);
+  // The helper reports Windows worktree paths (`C:\...`) with backslashes; prompts and checks use
+  // forward slashes. Only a drive path is converted: a backslash anywhere else stays unsafe.
+  if (typeof place.worktree === 'string' && /^[A-Za-z]:\\/.test(place.worktree)) {
+    place.worktree = place.worktree.split('\\').join('/');
+  }
   if (!isSafePath(place.worktree)) return block(t, 'worktree failed: the helper returned an unsafe worktree path');
   if (!isGitRef(place.branch)) return block(t, 'worktree failed: the helper returned an invalid branch name');
   if (!isGitRef(place.base)) return block(t, 'worktree failed: the helper returned an invalid base ref');
   const diffBase = place.base.startsWith('task/') ? place.base : prepared.start || place.base;
 
-  if ((await runAgent(implementerPrompt(r, place), { agentType: implementerType })) == null) {
-    return block(t, 'the implementer did not finish');
+  // A restarted task whose branch already has commits that no review has judged yet is verified
+  // first: when it passes, the work is done and only the review is missing, so no implementer runs.
+  let checked = null;
+  let failure = null;
+  const unreviewed =
+    Number.isInteger(place.commits) && place.commits > 0 && typeof place.head === 'string' && place.head !== place.reviewedHead;
+  if (unreviewed) {
+    const pre = await verify(t);
+    if (pre.ok) {
+      log(`${t.id}: the branch already passes verification; going straight to review`);
+      checked = pre;
+    } else {
+      failure = pre.output;
+    }
   }
-  let checked = await verify(t);
+
+  if (checked === null) {
+    if ((await runAgent(implementerPrompt(r, place, failure), { agentType: implementerType })) == null) {
+      return block(t, 'the implementer did not finish');
+    }
+    checked = await verify(t);
+  }
   if (!checked.ok) {
     log(`${t.id}: verification failed (${checked.error}); one more implementer attempt`);
     if ((await runAgent(implementerPrompt(r, place, checked.output), { agentType: implementerType })) == null) {
@@ -561,7 +644,7 @@ async function driveTask(t) {
       .map(f => (f && f.message ? String(f.message) : ''))
       .filter(Boolean)
       .join('; ');
-    return block(t, `review ${review.verdict || 'without verdict'}: ${findings || text(review.evidence) || 'no details'}`);
+    return block(t, `review ${review.verdict || 'without verdict'}: ${findings || text(review.evidence) || 'no details'}`, true, true);
   }
   const consistent =
     review.acceptance_met === true &&

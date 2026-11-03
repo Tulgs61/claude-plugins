@@ -73,6 +73,10 @@
             "description": "Set on an inbox task that came without an acceptance; the engine does not start it."
           },
           "pr": { "type": ["string", "null"] },
+          "reviewedHead": {
+            "type": ["string", "null"],
+            "description": "Head of the task branch that the last blocking review judged; set by the helper."
+          },
           "proof": { "type": "string", "description": "Command whose output shows the acceptance is met." },
           "status": {
             "type": "string",
