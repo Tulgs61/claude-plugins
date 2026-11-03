@@ -141,8 +141,9 @@ function opsPrompt(command) {
       '',
       'Step 2: run this in the foreground with the Bash tool and a timeout of 600000 ms, exactly as written.',
       'It waits up to 9 minutes. While it prints only PENDING, run it again, as often as needed (that is',
-      'expected, not a failure). Never use run_in_background, never run step 1 twice, never run any other',
-      'command, and do not try to fix anything the output reports:',
+      'expected, not a failure). When it prints NOT RUNNING, stop and answer with that. Never use',
+      'run_in_background, never run step 1 twice, never run any other command, and do not try to fix',
+      'anything the output reports:',
       '',
       `node "${detachPath}" wait "${out}"`,
       '',
@@ -542,7 +543,8 @@ async function block(t, note, failure = true, reviewed = false) {
 // in the way or a relay that keeps altering answers fail again the same way, so they are not retried.
 const mergeRetryable = answer =>
   !answer.conflicts &&
-  !/combined check failed|untracked files|conflicts with|altered in transit/.test(String(answer.error || ''));
+  !/combined check failed|untracked files|conflicts with|altered in transit/.test(String(answer.error || '')) &&
+  !answer.locked;
 
 async function merge(t) {
   let merged = await ops('merge', t.id);
@@ -651,7 +653,7 @@ async function driveTask(t) {
     review.scope_ok === true &&
     review.constraints_ok === true &&
     !list(review.findings).some(f => f && f.severity === 'high');
-  if (!consistent) return block(t, 'review inconsistent');
+  if (!consistent) return block(t, 'review inconsistent', true, true);
 
   const marked = await ops('status', t.id, 'verified', quoteText(`review verified: ${text(review.evidence)}`, 2000));
   if (!marked.ok) return block(t, `could not record verified: ${marked.error || 'unknown error'}`);

@@ -1325,12 +1325,60 @@ function untrackedBlockers(output) {
   return paths;
 }
 
+// Runs `fn` while holding the merge lock of the integration worktree: a file in its git directory that
+// names the holding process. Every merge goes through the one integration worktree, and a detached merge
+// can outlive the call that started it, so a second merge (another run after a takeover, or a retry) must
+// never touch the worktree while the first one is alive. A lock whose process is gone, or that is older
+// than LOCK_TTL_MS, is taken over.
+function withMergeLock(integration, fn) {
+  const lockPath = path.join(gitOk(integration, 'rev-parse', '--absolute-git-dir'), 'tasks-ledger-merge.lock');
+  const take = () => {
+    const fd = fs.openSync(lockPath, 'wx');
+    fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    fs.closeSync(fd);
+  };
+  try {
+    take();
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    let holder = null;
+    try {
+      holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    } catch {
+      holder = null;
+    }
+    const alive = pid => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (err) {
+        return err.code === 'EPERM';
+      }
+    };
+    const live = holder && Number.isInteger(holder.pid) && Date.now() - Number(holder.at) < LOCK_TTL_MS && alive(holder.pid);
+    if (live) fail(`another merge is running in ${integration} (pid ${holder.pid}); try again when it has finished`, { locked: true });
+    fs.rmSync(lockPath, { force: true });
+    take();
+  }
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(lockPath, { force: true });
+  }
+}
+
 function opMerge(ctx, [id]) {
   const { L } = ctx;
-  const t = findTask(ctx, id);
   const intBranch = L.integrationBranch || integrationBranchName(ctx);
   const integration = worktreeOfBranch(ctx.root, intBranch);
   if (!integration) fail('integration worktree missing');
+  findTask(ctx, id);
+  return withMergeLock(integration, () => mergeUnderLock(ctx, id, intBranch, integration));
+}
+
+function mergeUnderLock(ctx, id, intBranch, integration) {
+  const { L } = ctx;
+  const t = findTask(ctx, id);
   const branch = taskBranch(ctx, id);
   const inIntegration = () => git(integration, 'merge-base', '--is-ancestor', branch, 'HEAD').status === 0;
   // A repeated call for a task already merged (the engine runs a command again when its relayed
@@ -1350,11 +1398,12 @@ function opMerge(ctx, [id]) {
     return { id, sha, already: true };
   }
 
-  // A merge an earlier call left half done (its process was killed) is undone first: the integration
-  // branch belongs to the run, and its HEAD is the last merge that completed.
+  // A merge an earlier call left half done is undone first. This call holds the merge lock, so no live
+  // merge owns it: its process was killed. `merge --abort` puts back what was there before that merge;
+  // any other change to tracked files is then refused below, as always.
   if (git(integration, 'rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0) {
-    git(integration, 'merge', '--abort');
-    git(integration, 'reset', '-q', '--hard', 'HEAD');
+    const aborted = git(integration, 'merge', '--abort');
+    if (aborted.status !== 0) fail(`${id}: a half-done merge in ${integration} could not be undone: ${(aborted.stdout + aborted.stderr).trim()}`);
   }
   if (gitOk(integration, 'status', '--porcelain', '--untracked-files=no')) {
     fail(`integration worktree ${integration} has uncommitted changes to tracked files`);

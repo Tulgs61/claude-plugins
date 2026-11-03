@@ -4,14 +4,19 @@
 //   node ops-detach.js start <out> <script> [args...]  runs `node <script> args...` detached; stdout and stderr go
 //                                                      to <out>, <out>.done holds its exit code once it ends
 //   node ops-detach.js wait <out>                      waits up to 9 minutes; prints <out> when done, else PENDING
-// A `start` while the same <out> still has a live run prints RUNNING and starts nothing, so an ops agent that is
-// retried never runs a merge twice at once.
+// While the command runs, its runner touches <out>.beat every few seconds. A `start` while that heartbeat is fresh
+// prints RUNNING and starts nothing, so a retried ops agent never runs a merge twice at once. `wait` prints
+// NOT RUNNING when there is neither a result nor a fresh heartbeat (the runner died, or `start` never ran), and it
+// consumes a result it prints, so an answer is never handed out twice or to a later call.
 'use strict';
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
 
 const WAIT_MS = 9 * 60 * 1000;
 const POLL_MS = 5000;
+const BEAT_MS = 5000;
+// A heartbeat older than this means the runner is gone (machine restart, killed process).
+const STALE_MS = 60 * 1000;
 
 const [mode, out, ...rest] = process.argv.slice(2);
 if (!out || (mode !== 'start' && mode !== 'wait') || (mode === 'start' && !rest.length)) {
@@ -19,36 +24,37 @@ if (!out || (mode !== 'start' && mode !== 'wait') || (mode === 'start' && !rest.
   process.exit(1);
 }
 const done = `${out}.done`;
-const pidFile = `${out}.pid`;
+const beat = `${out}.beat`;
 
-function alive(pid) {
+function beating() {
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e.code === 'EPERM';
+    return Date.now() - fs.statSync(beat).mtimeMs < STALE_MS;
+  } catch {
+    return false;
   }
 }
 
 if (mode === 'start') {
-  const pid = Number.parseInt(fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf8') : '', 10);
-  if (!fs.existsSync(done) && Number.isInteger(pid) && pid > 0 && alive(pid)) {
-    console.log(`RUNNING ${pid}`);
+  if (!fs.existsSync(done) && beating()) {
+    console.log('RUNNING');
     process.exit(0);
   }
-  for (const f of [out, done, pidFile]) fs.rmSync(f, { force: true });
+  for (const f of [out, done, beat]) fs.rmSync(f, { force: true });
   fs.writeFileSync(out, '');
+  fs.writeFileSync(beat, '');
   // A small node parent, detached from this shell, opens <out> itself (file descriptors are not inherited by
-  // number on Windows), runs the command and writes the marker when it exits.
+  // number on Windows), runs the command, keeps the heartbeat fresh and writes the marker when it exits.
   const runner = [
     "const fs=require('node:fs');",
     `const fd=fs.openSync(${JSON.stringify(out)},'a');`,
+    `const touch=()=>{try{const t=new Date();fs.utimesSync(${JSON.stringify(beat)},t,t);}catch{}};`,
+    `const timer=setInterval(touch,${BEAT_MS});`,
+    `const end=code=>{clearInterval(timer);fs.writeFileSync(${JSON.stringify(done)},String(code));};`,
     `const c=require('node:child_process').spawn(process.execPath,${JSON.stringify(rest)},{stdio:['ignore',fd,fd],windowsHide:true});`,
-    `c.on('error',e=>{fs.writeSync(fd,String(e)+'\\n');fs.writeFileSync(${JSON.stringify(done)},'error');});`,
-    `c.on('exit',code=>fs.writeFileSync(${JSON.stringify(done)},String(code)));`,
+    "c.on('error',e=>{fs.writeSync(fd,String(e)+'\\n');end('error');});",
+    "c.on('exit',code=>end(code));",
   ].join('');
   const child = spawn(process.execPath, ['-e', runner], { detached: true, stdio: 'ignore', windowsHide: true });
-  fs.writeFileSync(pidFile, String(child.pid));
   child.unref();
   console.log(`STARTED ${child.pid}`);
   process.exit(0);
@@ -57,7 +63,13 @@ if (mode === 'start') {
 const deadline = Date.now() + WAIT_MS;
 (function poll() {
   if (fs.existsSync(done)) {
-    process.stdout.write(fs.readFileSync(out, 'utf8'));
+    const text = fs.readFileSync(out, 'utf8');
+    for (const f of [out, done, beat]) fs.rmSync(f, { force: true });
+    process.stdout.write(text);
+    return;
+  }
+  if (!beating()) {
+    console.log('NOT RUNNING');
     return;
   }
   if (Date.now() > deadline) {

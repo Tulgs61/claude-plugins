@@ -93,6 +93,18 @@ test('a review that blocks the task passes the reviewed flag; other blocks do no
   const verifyFails = await runEngine([task('T1')], { answers: { verify: () => ({ ok: false, error: 'boom' }) } });
   const line = verifyFails.opsLines.find(l => /^status "\/tmp\/ledger\.json" T1 blocked /.test(l));
   assert.doesNotMatch(line, / reviewed$/);
+
+  const inconsistent = await runEngine([task('T1')], {
+    taskAgent: prompt => (/^TASK: /.test(prompt) ? 'done' : { verdict: 'verified', acceptance_met: true, scope_ok: true, constraints_ok: true, findings: [{ message: 'x', severity: 'high' }], evidence: 'x' }),
+  });
+  const judged = inconsistent.opsLines.find(l => /^status "\/tmp\/ledger\.json" T1 blocked /.test(l));
+  assert.match(judged, /review inconsistent.* reviewed$/);
+});
+
+test('the detached prompt tells the ops agent to stop on NOT RUNNING', async () => {
+  const { opsCalls } = await runEngine([task('T1')]);
+  const verify = opsCalls.find(c => c.op === 'verify');
+  assert.match(verify.prompt, /When it prints NOT RUNNING, stop and answer with that\./);
 });
 
 test('a backslashed Windows drive path from the helper is used with forward slashes; other backslashes stay unsafe', async () => {
@@ -118,6 +130,8 @@ test('a merge without an answer is tried once more; a conflict or failed check i
   for (const answer of [
     { ok: false, error: 'T1 conflicts with already-merged tasks', conflicts: ['a.txt'] },
     { ok: false, error: 'T1: combined check failed after merging (x, exit 1); merge aborted' },
+    { ok: false, error: 'T1: untracked files in the integration worktree block the merge: x' },
+    { ok: false, error: 'another merge is running in /tmp/int (pid 7); try again when it has finished', locked: true },
   ]) {
     const { counts, result } = await runEngine([task('T1')], { answers: { merge: () => answer } });
     assert.equal(counts.merge, 1, answer.error);

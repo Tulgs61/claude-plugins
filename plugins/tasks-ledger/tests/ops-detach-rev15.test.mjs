@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,7 +26,7 @@ test('start runs the script detached and wait prints its output once it ends', t
   assert.match(started.stdout, /^STARTED \d+/);
   const waited = detach('wait', out);
   assert.equal(waited.stdout.trim(), JSON.stringify({ ok: true, args: ['verify', 'T1'] }));
-  assert.equal(existsSync(`${out}.done`), true);
+  assert.equal(existsSync(`${out}.done`), false, 'the result is consumed');
 });
 
 test('a second start while the first run is alive prints RUNNING and starts nothing', t => {
@@ -39,12 +39,38 @@ test('a second start while the first run is alive prints RUNNING and starts noth
   );
   const out = path.join(dir, 'run.out');
   assert.match(detach('start', out, script).stdout, /^STARTED/);
-  assert.match(detach('start', out, script).stdout, /^RUNNING \d+/);
+  assert.match(detach('start', out, script).stdout, /^RUNNING$/m);
   assert.equal(detach('wait', out).stdout.trim(), '{"ok":true}');
   // Once done, a new start runs the command again.
   assert.match(detach('start', out, script).stdout, /^STARTED/);
   detach('wait', out);
   assert.equal(readFileSync(marker, 'utf8'), 'xx');
+});
+
+test('wait consumes the result: a second wait, or a wait without a start, says NOT RUNNING', t => {
+  const dir = scratch(t);
+  const script = path.join(dir, 'answer.js');
+  writeFileSync(script, 'console.log(\'{"ok":true}\');\n');
+  const out = path.join(dir, 'run.out');
+  assert.equal(detach('wait', out).stdout.trim(), 'NOT RUNNING');
+  detach('start', out, script);
+  assert.equal(detach('wait', out).stdout.trim(), '{"ok":true}');
+  assert.equal(detach('wait', out).stdout.trim(), 'NOT RUNNING');
+  assert.equal(existsSync(out) || existsSync(`${out}.done`) || existsSync(`${out}.beat`), false, 'nothing is left behind');
+});
+
+test('a stale heartbeat (dead runner) is not RUNNING: wait says NOT RUNNING and start runs again', t => {
+  const dir = scratch(t);
+  const script = path.join(dir, 'answer.js');
+  writeFileSync(script, 'console.log(\'{"ok":true}\');\n');
+  const out = path.join(dir, 'run.out');
+  writeFileSync(out, '');
+  writeFileSync(`${out}.beat`, '');
+  const old = new Date(Date.now() - 10 * 60 * 1000);
+  utimesSync(`${out}.beat`, old, old);
+  assert.equal(detach('wait', out).stdout.trim(), 'NOT RUNNING');
+  assert.match(detach('start', out, script).stdout, /^STARTED/);
+  assert.equal(detach('wait', out).stdout.trim(), '{"ok":true}');
 });
 
 test('usage errors exit 1', () => {
