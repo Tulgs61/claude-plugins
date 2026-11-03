@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { uptime } from 'node:os';
 import path from 'node:path';
 import { TOPIC, sandbox, task } from './helpers/git-sandbox.mjs';
 
@@ -111,6 +112,19 @@ test('a merge lock of a process that is gone is taken over, and released after t
   sb.ok('merge', 'T1');
   assert.equal(sb.taskOf('T1').status, 'merged');
   assert.equal(existsSync(lock), false);
+});
+
+test('a merge lock written before the machine last booted is dead, even when its pid is alive now', t => {
+  const sb = sandbox(t, { tasks: [task('T1')] });
+  const prep = sb.ok('prepare', 'run-one');
+  const w = sb.ok('worktree', 'T1');
+  sb.commit(w.worktree, 'a.txt', 'a\n');
+  const lock = path.join(sb.git(prep.integration, 'rev-parse', '--absolute-git-dir'), 'tasks-ledger-merge.lock');
+  // This live process stands in for an unrelated one that got the pid after a reboot.
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now() - uptime() * 1000 - 60 * 1000 }));
+  sb.ok('status', 'T1', 'verified', 'reviewed');
+  sb.ok('merge', 'T1');
+  assert.equal(sb.taskOf('T1').status, 'merged');
 });
 
 test('merge still refuses other uncommitted changes to tracked files in the integration worktree', t => {

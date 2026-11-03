@@ -1347,15 +1347,10 @@ function withMergeLock(integration, fn) {
     } catch {
       holder = null;
     }
-    const alive = pid => {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch (err) {
-        return err.code === 'EPERM';
-      }
-    };
-    const live = holder && Number.isInteger(holder.pid) && Date.now() - Number(holder.at) < LOCK_TTL_MS && alive(holder.pid);
+    // A lock from before the machine last booted is dead whatever process now has its pid.
+    const bootedAt = Date.now() - os.uptime() * 1000;
+    const at = Number(holder && holder.at);
+    const live = holder && at > bootedAt && Date.now() - at < LOCK_TTL_MS && processAlive(holder.pid);
     if (live) fail(`another merge is running in ${integration} (pid ${holder.pid}); try again when it has finished`, { locked: true });
     fs.rmSync(lockPath, { force: true });
     take();

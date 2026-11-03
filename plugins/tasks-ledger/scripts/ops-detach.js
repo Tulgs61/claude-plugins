@@ -61,6 +61,7 @@ if (mode === 'start') {
 }
 
 const deadline = Date.now() + WAIT_MS;
+let recheck = false;
 (function poll() {
   if (fs.existsSync(done)) {
     const text = fs.readFileSync(out, 'utf8');
@@ -68,10 +69,17 @@ const deadline = Date.now() + WAIT_MS;
     process.stdout.write(text);
     return;
   }
+  if (!beating() && !recheck) {
+    // After a machine sleep the runner needs a moment to touch the heartbeat again: look once more.
+    recheck = true;
+    setTimeout(poll, BEAT_MS * 2);
+    return;
+  }
   if (!beating()) {
     console.log('NOT RUNNING');
     return;
   }
+  recheck = false;
   if (Date.now() > deadline) {
     console.log('PENDING');
     return;
