@@ -60,8 +60,13 @@ The helper also keeps answers short, since long answers are the ones relays tend
 workflow fetches its full record with `task <ledger> <id>` and takes the title, acceptance, proof,
 budget and constraints for the implementer and reviewer prompts from there. A task is blocked as not
 dispatchable only when that record has no proof or no budget. A task may name the model of its
-implementer (`model`) and of its reviewer (`reviewModel`): `haiku`, `sonnet` or `opus`. Unset, the
-agent definition's model applies; the helper refuses a ledger that names any other value.
+implementer (`model`) and of its reviewer (`reviewModel`): `haiku`, `sonnet` or `opus`. Without a
+`reviewModel` the reviewer runs on the task's `model`; with neither, the agent definitions' models apply.
+The helper refuses a ledger that names any other value.
+
+A rejected review sends the task back to its implementer with the reviewer's findings, in the same
+worktree, up to two times; each fix round is verified and reviewed again (on the same review model),
+and the next rejection blocks the task. A `needs_input` verdict blocks at once.
 
 ### Parallel tasks
 
@@ -117,7 +122,7 @@ Plugin agents are namespaced by the plugin name, so the workflow starts `tasks-l
 
 | Arg | Default | Use |
 |---|---|---|
-| `implementerAgent` | `tasks-ledger:task-implementer` | Agent type started once per task (and once more on a verification retry). |
+| `implementerAgent` | `tasks-ledger:task-implementer` | Agent type started once per task (once more on a verification retry, and once per review fix round). |
 | `reviewerAgent` | `tasks-ledger:reviewer` | Agent type that reviews each task's diff; it must answer with the JSON verdict the workflow asks for. |
 
 One more optional arg changes what a failure does: `keepGoing: true` lets the run continue past a blocked

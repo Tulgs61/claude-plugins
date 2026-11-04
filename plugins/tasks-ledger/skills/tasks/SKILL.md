@@ -141,7 +141,9 @@ again as under "Before a ledger edit"; the engine reads the object from
 the ledger on every start, so a resume needs nothing more. Passing `implementerAgent` or
 `reviewerAgent` as engine arguments still overrides the ledger; do that only when the user wants a
 different agent for this one start. A task's own `model` and `reviewModel` override the model of
-whichever implementer and reviewer type runs it, custom types included.
+whichever implementer and reviewer type runs it, custom types included; without `reviewModel` the
+reviewer runs on the task's `model`. A rejected review gets up to two fix rounds by the implementer
+before the task blocks, so a task blocked by its review already failed three reviews (or asked for input).
 
 ## Resume
 

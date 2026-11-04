@@ -87,7 +87,7 @@ Each task gets:
 - `constraints`: what must not change, when there is anything to say;
 - `model`, `reviewModel` (optional): `haiku`, `sonnet` or `opus` for this task's implementer and
   reviewer, when the user wants models chosen per task (for example the cheapest one that can do it);
-  left out, the agent definitions decide. Tasks added through the inbox (`add`) come without a
+  without `reviewModel` the reviewer runs on `model`; with neither, the agent definitions decide. Tasks added through the inbox (`add`) come without a
   model; set it with a ledger edit before the run when it matters;
 - `status`: `todo`.
 

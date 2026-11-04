@@ -84,7 +84,11 @@ version `<version>` is tagged `<name>--v<version>`.
 - Optional task fields `model` and `reviewModel` (`haiku`, `sonnet` or `opus`) pick the model of that
   task's implementer and reviewer, so a run can give small tasks a cheaper model. Unset, the agent
   definition's model applies as before. `task` hands both through; a ledger naming another value is
-  refused when it is read.
+  refused when it is read. Without a `reviewModel` the reviewer runs on the task's `model`, so a cheap
+  implementer's work is not judged by a more expensive model by default.
+- Review fix rounds: a rejected review (or a `verified` one with a high finding) sends the task back to
+  its implementer with the findings, in the same worktree, up to two times; each round is verified and
+  reviewed again, and the next rejection blocks the task. `needs_input` still blocks at once.
 
 #### Changed
 

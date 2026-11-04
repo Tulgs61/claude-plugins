@@ -79,7 +79,7 @@
           "pr": { "type": ["string", "null"] },
           "reviewModel": {
             "enum": ["haiku", "sonnet", "opus", null],
-            "description": "Model of this task's reviewer; unset or null = the agent definition's model."
+            "description": "Model of this task's reviewer; unset or null = the task's model, else the agent definition's model."
           },
           "reviewedHead": {
             "type": ["string", "null"],
