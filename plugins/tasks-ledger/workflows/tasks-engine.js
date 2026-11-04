@@ -19,6 +19,10 @@ const OPS_ATTEMPTS = 3;
 // Ops agents only run one command and copy its answer line back, so they run on a small model at low
 // effort; the last attempt inherits the session model in case the small one keeps altering the copy.
 const OPS_MODEL = 'haiku';
+// A task may name the model of its implementer (`model`) and reviewer (`reviewModel`); any other
+// value (the helper refuses one at load) leaves the agent definition's model.
+const TASK_MODELS = ['haiku', 'sonnet', 'opus'];
+const modelOf = value => (TASK_MODELS.includes(value) ? { model: value } : {});
 const OPS_EFFORT = 'low';
 // `verify` and `merge` run the repo's verify command (often 30+ minutes), longer than the Bash tool's
 // 10-minute foreground limit, which killed merges half-way. A background Bash job does not help: a
@@ -622,14 +626,14 @@ async function driveTask(t) {
   }
 
   if (checked === null) {
-    if ((await runAgent(implementerPrompt(r, place, failure), { agentType: implementerType })) == null) {
+    if ((await runAgent(implementerPrompt(r, place, failure), { agentType: implementerType, ...modelOf(r.model) })) == null) {
       return block(t, 'the implementer did not finish');
     }
     checked = await verify(t);
   }
   if (!checked.ok) {
     log(`${t.id}: verification failed (${checked.error}); one more implementer attempt`);
-    if ((await runAgent(implementerPrompt(r, place, checked.output), { agentType: implementerType })) == null) {
+    if ((await runAgent(implementerPrompt(r, place, checked.output), { agentType: implementerType, ...modelOf(r.model) })) == null) {
       return block(t, `the implementer did not finish its retry after: ${checked.error}`);
     }
     checked = await verify(t);
@@ -639,6 +643,7 @@ async function driveTask(t) {
   const review = await runAgent(reviewerPrompt(r, place, diffBase, checked.tail), {
     agentType: reviewerType,
     schema: REVIEW_SCHEMA,
+    ...modelOf(r.reviewModel),
   });
   if (review == null || typeof review !== 'object') return block(t, 'the reviewer did not finish');
   if (review.verdict !== 'verified') {

@@ -17,10 +17,12 @@ const TASK_KEYS = [
 // The fields of the full record of one task (`task`) and of the short listing of every task. The
 // listing stays small: long relayed answers are the ones that get shortened.
 const RECORD_LISTS = ['constraints', 'dependsOn', 'files'];
-const RECORD_SCALARS = ['acceptance', 'base', 'branch', 'budget', 'id', 'pr', 'proof', 'status', 'title', 'worktree'];
+const RECORD_SCALARS = ['acceptance', 'base', 'branch', 'budget', 'id', 'model', 'pr', 'proof', 'reviewModel', 'status', 'title', 'worktree'];
 const SUMMARY_LISTS = ['dependsOn', 'files'];
 const SUMMARY_SCALARS = ['base', 'branch', 'id', 'pr', 'status', 'worktree'];
 const ID_RE = /^T[0-9]+$/;
+// The models a task may name for its implementer (`model`) and reviewer (`reviewModel`).
+const TASK_MODELS = ['haiku', 'sonnet', 'opus'];
 const INBOX_ID_RE = /^T[0-9]{1,9}$/;
 const TOPIC_RE = /^[a-z0-9][a-z0-9-]*$/;
 const RUN_ID_RE = /^[A-Za-z0-9-]{4,64}$/;
@@ -325,6 +327,11 @@ function validateLedger(L) {
   for (const t of L.tasks) {
     if (!t || typeof t !== 'object' || typeof t.id !== 'string' || !ID_RE.test(t.id)) {
       fail(`invalid task id ${t && typeof t === 'object' ? String(t.id) : String(t)}: unsafe for paths and git, must match ${ID_RE}`);
+    }
+    for (const k of ['model', 'reviewModel']) {
+      if (t[k] !== undefined && t[k] !== null && !TASK_MODELS.includes(t[k])) {
+        fail(`invalid ${k} ${JSON.stringify(t[k])} of ${t.id}: expected one of ${TASK_MODELS.join(', ')}`);
+      }
     }
     if (t.dependsOn !== undefined && t.dependsOn !== null) {
       if (!Array.isArray(t.dependsOn)) fail(`unsafe dependsOn of ${t.id}: not an array`);

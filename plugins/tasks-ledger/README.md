@@ -59,7 +59,9 @@ The helper also keeps answers short, since long answers are the ones relays tend
 `branch`, `base`, `worktree`, `pr` and `needsAcceptance`). Right before a task is dispatched, the
 workflow fetches its full record with `task <ledger> <id>` and takes the title, acceptance, proof,
 budget and constraints for the implementer and reviewer prompts from there. A task is blocked as not
-dispatchable only when that record has no proof or no budget.
+dispatchable only when that record has no proof or no budget. A task may name the model of its
+implementer (`model`) and of its reviewer (`reviewModel`): `haiku`, `sonnet` or `opus`. Unset, the
+agent definition's model applies; the helper refuses a ledger that names any other value.
 
 ### Parallel tasks
 

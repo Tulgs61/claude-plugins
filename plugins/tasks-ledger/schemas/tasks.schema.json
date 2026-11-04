@@ -72,7 +72,15 @@
             "type": "boolean",
             "description": "Set on an inbox task that came without an acceptance; the engine does not start it."
           },
+          "model": {
+            "enum": ["haiku", "sonnet", "opus", null],
+            "description": "Model of this task's implementer; unset or null = the agent definition's model."
+          },
           "pr": { "type": ["string", "null"] },
+          "reviewModel": {
+            "enum": ["haiku", "sonnet", "opus", null],
+            "description": "Model of this task's reviewer; unset or null = the agent definition's model."
+          },
           "reviewedHead": {
             "type": ["string", "null"],
             "description": "Head of the task branch that the last blocking review judged; set by the helper."

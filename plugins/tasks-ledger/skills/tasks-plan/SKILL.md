@@ -85,6 +85,10 @@ Each task gets:
 - `files`: the globs of the files this task owns and may change;
 - `dependsOn`: the ids it must wait for (possibly empty);
 - `constraints`: what must not change, when there is anything to say;
+- `model`, `reviewModel` (optional): `haiku`, `sonnet` or `opus` for this task's implementer and
+  reviewer, when the user wants models chosen per task (for example the cheapest one that can do it);
+  left out, the agent definitions decide. Tasks added through the inbox (`add`) come without a
+  model; set it with a ledger edit before the run when it matters;
 - `status`: `todo`.
 
 Partitioning rules:

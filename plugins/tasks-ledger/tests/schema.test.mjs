@@ -98,7 +98,7 @@ test('the schema pins the ledger shape from the spec', () => {
   assert.equal(t.additionalProperties, false);
   assert.deepEqual([...t.required].sort(), ['acceptance', 'dependsOn', 'files', 'id', 'status', 'title']);
   assert.deepEqual(Object.keys(t.properties).sort(), [
-    'acceptance', 'base', 'branch', 'budget', 'constraints', 'dependsOn', 'evidence', 'files', 'id', 'needsAcceptance', 'pr', 'proof', 'reviewedHead', 'status', 'title', 'worktree',
+    'acceptance', 'base', 'branch', 'budget', 'constraints', 'dependsOn', 'evidence', 'files', 'id', 'model', 'needsAcceptance', 'pr', 'proof', 'reviewModel', 'reviewedHead', 'status', 'title', 'worktree',
   ]);
   assert.equal(t.properties.id.pattern, '^T[0-9]+$');
   assert.equal(t.properties.dependsOn.items.pattern, '^T[0-9]+$');
@@ -223,6 +223,13 @@ test('other violations are rejected too', () => {
   const files = good();
   files.tasks[0].files = ['src/**', 7];
   assertInvalid(files, 'expected string', 'non-string file glob');
+});
+
+test('a task model and review model are haiku, sonnet or opus (rev 16)', () => {
+  const withTask = extra => ({ ...good(), tasks: [{ ...good().tasks[0], ...extra }] });
+  for (const m of ['haiku', 'sonnet', 'opus', null]) assertValid(withTask({ model: m, reviewModel: m }), `model ${m}`);
+  assertInvalid(withTask({ model: 'gpt-4' }), 'enum', 'unknown model');
+  assertInvalid(withTask({ reviewModel: 'Opus' }), 'enum', 'review model in the wrong case');
 });
 
 test('maxParallel is an integer from 1 to 16 (rev 14)', () => {

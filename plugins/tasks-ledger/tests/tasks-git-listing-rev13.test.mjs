@@ -8,7 +8,7 @@ import vm from 'node:vm';
 import { ENGINE, sandbox, task } from './helpers/git-sandbox.mjs';
 
 const SUMMARY_KEYS = ['base', 'branch', 'dependsOn', 'files', 'id', 'needsAcceptance', 'pr', 'status', 'worktree'];
-const RECORD_KEYS = ['acceptance', 'base', 'branch', 'budget', 'constraints', 'dependsOn', 'files', 'id', 'needsAcceptance', 'pr', 'proof', 'status', 'title', 'worktree'];
+const RECORD_KEYS = ['acceptance', 'base', 'branch', 'budget', 'constraints', 'dependsOn', 'files', 'id', 'model', 'needsAcceptance', 'pr', 'proof', 'reviewModel', 'status', 'title', 'worktree'];
 
 const listings = sb => [sb.ok('prepare', 'listing-run'), sb.ok('sync', 'listing-run'), sb.ok('finish', 'finished', '', 'listing-run')];
 

@@ -81,7 +81,8 @@ Rules for the content:
 Show the same contract in these three forms, in this order, each ready to paste:
 
 1. **Agent call**: an Agent tool call with `subagent_type: "tasks-ledger:task-implementer"` (or the
-   agent the user named), a short `description`, and the contract as `prompt`.
+   agent the user named), a short `description`, and the contract as `prompt`; for a ledger task
+   with a `model`, also pass that as the Agent `model`.
 2. **`claude --bg` command**: one shell command, run from the dispatch worktree of step 3, that
    passes the contract as the prompt, quoted so the shell leaves it intact (a single-quoted string or
    a heredoc).

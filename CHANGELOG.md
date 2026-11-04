@@ -77,6 +77,10 @@ version `<version>` is tagged `<name>--v<version>`.
   that unchanged head goes to the implementer again, never straight back to review. A task a review
   blocked before this version has no `reviewedHead`: on restart it is verified and reviewed once more
   without an implementer. The review gate still applies, so this costs a cycle but lets nothing through.
+- Optional task fields `model` and `reviewModel` (`haiku`, `sonnet` or `opus`) pick the model of that
+  task's implementer and reviewer, so a run can give small tasks a cheaper model. Unset, the agent
+  definition's model applies as before. `task` hands both through; a ledger naming another value is
+  refused when it is read.
 
 #### Changed
 

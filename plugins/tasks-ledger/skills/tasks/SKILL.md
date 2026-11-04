@@ -140,7 +140,8 @@ Edit tool only before the run starts, never while a run is live, and only after 
 again as under "Before a ledger edit"; the engine reads the object from
 the ledger on every start, so a resume needs nothing more. Passing `implementerAgent` or
 `reviewerAgent` as engine arguments still overrides the ledger; do that only when the user wants a
-different agent for this one start.
+different agent for this one start. A task's own `model` and `reviewModel` override the model of
+whichever implementer and reviewer type runs it, custom types included.
 
 ## Resume
 
