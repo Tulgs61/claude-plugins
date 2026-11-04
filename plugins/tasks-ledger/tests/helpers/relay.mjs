@@ -99,7 +99,7 @@ export async function runEngine(records, { answers = {}, relay = (_op, _n, line)
     }
     const line = opsCommand(prompt);
     opsLines.push(line);
-    const [op, , ...rest] = line.replace(/"/g, '').split(' ');
+    const [op, , ...rest] = line.replace(/"/g, '').replace(/ known \S+$/, '').split(' '); // known ids: rev 19
     counts[op] = (counts[op] || 0) + 1;
     opsCalls.push({ op, prompt, options });
     const payload = canned[op] ? canned[op](...rest, counts[op]) : { ok: true };

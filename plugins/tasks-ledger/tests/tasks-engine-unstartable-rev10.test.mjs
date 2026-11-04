@@ -38,7 +38,7 @@ async function runEngine(ledgerTasks, { answers = {} } = {}) {
     const line = opsCommand(prompt);
     opsLines.push(line);
     events.push(line);
-    const [op, , ...rest] = line.replace(/"/g, '').split(' ');
+    const [op, , ...rest] = line.replace(/"/g, '').replace(/ known \S+$/, '').split(' '); // known ids: rev 19
     counts[op] = (counts[op] || 0) + 1;
     return reply(op, rest[0], canned[op] ? canned[op](...rest, counts[op]) : { ok: true });
   };

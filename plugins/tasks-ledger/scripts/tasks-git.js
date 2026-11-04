@@ -1042,13 +1042,24 @@ function opTask(ctx, [id]) {
 
 // Ingests the inbox and refreshes the lock under the guard, so overlapping calls process the inbox one after
 // the other from the ledger as the previous one left it.
-function opSync(ctx, [runId]) {
+// sync <runId> [known <T1,T2,...>]: `known` names the tasks the caller already has; they are left
+// out of `tasks`, so a heartbeat answer stays a few bytes long (the relay copies every byte of it).
+const KNOWN_IDS_RE = /^T[0-9]+(,T[0-9]+)*$/;
+function opSync(ctx, [runId, knownFlag, knownList, ...extra]) {
+  let known = new Set();
+  if (knownFlag !== undefined) {
+    if (knownFlag !== 'known' || typeof knownList !== 'string' || !KNOWN_IDS_RE.test(knownList) || extra.length > 0) {
+      fail(`bad sync arguments: expected known <T1,T2,...>, got ${JSON.stringify([knownFlag, knownList, ...extra])}`);
+    }
+    known = new Set(knownList.split(','));
+  }
   return withLockGuard(ctx, () => {
     refreshLockGuarded(ctx, runId);
     Object.assign(ctx, readLedgerFile(ctx.ledgerFile));
     const { added, consume } = ingestInbox(ctx);
     const warnings = consume(added.length ? persistLedger(ctx) : undefined);
-    return { added, tasks: listing(ctx.L), ...(warnings.length ? { warnings } : {}) };
+    const tasks = listing(ctx.L).filter(t => !known.has(t.id));
+    return { added, tasks, ...(warnings.length ? { warnings } : {}) };
   });
 }
 

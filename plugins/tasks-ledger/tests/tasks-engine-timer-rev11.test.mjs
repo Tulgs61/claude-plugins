@@ -12,7 +12,8 @@ const body = readFileSync(ENGINE, 'utf8').replace(/^export\s+/m, '');
 
 const GOOD_REVIEW = { verdict: 'verified', acceptance_met: true, scope_ok: true, constraints_ok: true, findings: [], evidence: 'ok' };
 const MINUTE = 60 * 1000;
-const REFRESH_MS = 10 * MINUTE;
+const REFRESH_MIN = 30;
+const REFRESH_MS = REFRESH_MIN * MINUTE;
 const UNAVAILABLE = 'unavailable in workflow scripts (breaks resume)';
 
 // Lets every pending promise reaction run; `setImmediate` is not mocked.
@@ -117,7 +118,7 @@ function startEngine(ledgerTasks, opts = {}) {
     const line = opsCommand(prompt);
     opsLines.push(line);
     events.push(line);
-    const [op, , ...rest] = line.replace(/"/g, '').split(' ');
+    const [op, , ...rest] = line.replace(/"/g, '').replace(/ known \S+$/, '').split(' '); // known ids: rev 19
     counts[op] = (counts[op] || 0) + 1;
     const answer = canned[op] ? await canned[op](...rest, counts[op], state) : { ok: true };
     if (op === 'sync') syncs.push({ minute: state.minute, during: state.agentsInProgress > 0, ok: answer.ok === true });
@@ -169,8 +170,8 @@ test('source check: the body reads neither the clock nor Math.random', () => {
   }
 });
 
-test('heartbeat: a single 35-minute implementer call gets a sync at least every 10 minutes', async () => {
-  const engine = startEngine([task('T1', ['src/**'])], { implementer: longAgent(35, 'done') });
+test('heartbeat: a single 105-minute implementer call gets a sync at least every 30 minutes', async () => {
+  const engine = startEngine([task('T1', ['src/**'])], { implementer: longAgent(3.5 * REFRESH_MIN, 'done') });
   try {
     const result = await engine.promise;
     assert.equal(result.stopped, null, engine.logs.join('\n'));
@@ -182,16 +183,16 @@ test('heartbeat: a single 35-minute implementer call gets a sync at least every 
       assert.ok(previous, JSON.stringify(engine.syncs));
       assert.ok((s.minute - previous.minute) * MINUTE >= REFRESH_MS, JSON.stringify(engine.syncs));
     }
-    for (const e of engine.events.filter(isSync)) assert.equal(e, 'sync "/tmp/ledger.json" test1');
+    for (const e of engine.events.filter(isSync)) assert.equal(e, 'sync "/tmp/ledger.json" test1 known T1');
   } finally {
     engine.done();
   }
 });
 
-test('heartbeat: a failed heartbeat sync is logged and retried 10 minutes later without stopping the run', async () => {
+test('heartbeat: a failed heartbeat sync is logged and retried 30 minutes later without stopping the run', async () => {
   let failed = null;
   const engine = startEngine([task('T1', ['src/**'])], {
-    implementer: longAgent(35, 'done'),
+    implementer: longAgent(3.5 * REFRESH_MIN, 'done'),
     answers: {
       sync: (_runId, _n, state) => {
         if (state.agentsInProgress > 0 && failed === null) {
@@ -208,8 +209,8 @@ test('heartbeat: a failed heartbeat sync is logged and retried 10 minutes later 
     assert.notEqual(failed, null, JSON.stringify(engine.syncs));
     assert.ok(engine.logs.some(l => l.includes('lock refresh failed')), engine.logs.join('\n'));
     assert.ok(
-      engine.syncs.some(s => s.during && s.minute === failed + 10),
-      `a further heartbeat 10 minutes after minute ${failed}: ${JSON.stringify(engine.syncs)}`
+      engine.syncs.some(s => s.during && s.minute === failed + REFRESH_MIN),
+      `a further heartbeat ${REFRESH_MIN} minutes after minute ${failed}: ${JSON.stringify(engine.syncs)}`
     );
   } finally {
     engine.done();
@@ -247,7 +248,7 @@ async function assertNothingAfterTheEnd(engine) {
 }
 
 test('no timer after the end: neither after a normal run nor after one whose main loop ends in its catch', async () => {
-  const normal = startEngine([task('T1', ['src/**'])], { implementer: longAgent(25, 'done') });
+  const normal = startEngine([task('T1', ['src/**'])], { implementer: longAgent(2.5 * REFRESH_MIN, 'done') });
   try {
     const result = await normal.promise;
     assert.equal(result.stopped, null, normal.logs.join('\n'));
@@ -279,7 +280,7 @@ test('no timer after the end: neither after a normal run nor after one whose mai
 test('heartbeat reports unstartable tasks: they get no agent and are named in stopped', async () => {
   let reported = false;
   const engine = startEngine([task('T1', ['src/**'])], {
-    implementer: longAgent(25, 'done'),
+    implementer: longAgent(2.5 * REFRESH_MIN, 'done'),
     answers: {
       sync: (_runId, _n, state) => {
         if (state.agentsInProgress > 0 && !reported) {
@@ -307,9 +308,9 @@ test('heartbeat reports unstartable tasks: they get no agent and are named in st
   }
 });
 
-test('a failed sync right before a 35-minute implementer still arms the timer: heartbeats follow during the call', async () => {
+test('a failed sync right before a 105-minute implementer still arms the timer: heartbeats follow during the call', async () => {
   const engine = startEngine([task('T1', ['src/**'])], {
-    implementer: longAgent(35, 'done'),
+    implementer: longAgent(3.5 * REFRESH_MIN, 'done'),
     answers: { sync: (_runId, n) => (n === 1 ? { ok: false, error: 'lock busy' } : { ok: true, tasks: [] }) },
   });
   try {
@@ -326,7 +327,7 @@ test('a failed sync right before a 35-minute implementer still arms the timer: h
 
 test('the timer fires while no task agent runs: no sync while only verify runs, the boundary before the reviewer refreshes the lock', async () => {
   // `verify` is not on the serialised helper path, so a heartbeat started while it runs would reach the
-  // helper during it. The timer fires 10 minutes into the 11-minute verify; no task agent is running.
+  // helper during it. The timer fires 30 minutes into the 31-minute verify; no task agent is running.
   let verifying = false;
   const syncsDuringVerify = [];
   const engine = startEngine([task('T1', ['src/**'])], {
@@ -334,7 +335,7 @@ test('the timer fires while no task agent runs: no sync while only verify runs, 
       verify: async (_id, _n, state) => {
         verifying = true;
         try {
-          await state.advance(11);
+          await state.advance(REFRESH_MIN + 1);
         } finally {
           verifying = false;
         }

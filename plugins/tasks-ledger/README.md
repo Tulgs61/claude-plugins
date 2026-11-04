@@ -29,7 +29,7 @@ the `.claude/verify.cmd` opt-in) are in [`rules/conventions.md`](rules/conventio
 
 ### Long runs
 
-The workflow keeps its run lock fresh with a `sync` at least every 10 minutes while an implementer or
+The workflow keeps its run lock fresh with a `sync` at least every 30 minutes while an implementer or
 reviewer is working, and right before and after each of them when one is due. A failed refresh is logged
 and does not stop the run. Two limits remain:
 
@@ -56,7 +56,10 @@ which can take longer than the Bash tool's 10-minute limit. They run detached th
 
 The helper also keeps answers short, since long answers are the ones relays tend to abridge. `prepare`,
 `sync` and `finish` list only each task's scheduling fields (`id`, `status`, `dependsOn`, `files`,
-`branch`, `base`, `worktree`, `pr` and `needsAcceptance`). Right before a task is dispatched, the
+`branch`, `base`, `worktree`, `pr` and `needsAcceptance`). `sync` also leaves out the tasks the
+workflow names as already known (`known T1,T2,…`), so a lock refresh lists only tasks the workflow
+does not know yet (new from the inbox, also when an earlier answer was lost). Right before a task is
+dispatched, the
 workflow fetches its full record with `task <ledger> <id>` and takes the title, acceptance, proof,
 budget and constraints for the implementer and reviewer prompts from there. A task is blocked as not
 dispatchable only when that record has no proof or no budget. A task may name the model of its

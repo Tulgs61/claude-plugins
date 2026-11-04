@@ -37,7 +37,7 @@ async function runEngine(ledgerTasks, { answers = {}, start = 'abc123', runId = 
     prompts.push(prompt);
     const line = opsCommand(prompt);
     opsLines.push(line);
-    const [op, , ...rest] = line.replace(/"/g, '').split(' ');
+    const [op, , ...rest] = line.replace(/"/g, '').replace(/ known \S+$/, '').split(' '); // known ids: rev 19
     return reply(op, rest[0], canned[op] ? canned[op](...rest) : { ok: true });
   };
   const args = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId };

@@ -102,6 +102,11 @@ version `<version>` is tagged `<name>--v<version>`.
   are still refused.
 - Worktree paths that the helper reports as Windows drive paths with backslashes (`C:\…`) are
   converted to forward slashes. A backslash anywhere else still makes the path unsafe.
+- Cheaper lock refreshes. The engine passes the ids it already knows (`sync <ledger> <runId> known
+  T1,T2,…`), and the helper leaves those tasks out of its answer, so a heartbeat no longer relays the
+  whole ledger. Tasks added through the inbox are still listed in full. The refresh interval goes from
+  10 to 30 minutes (the lock goes stale after six hours). In a 23-task run, `sync` relays were about
+  half of the helper agents' cost.
 
 ### [0.6.0] - 2026-10-24
 

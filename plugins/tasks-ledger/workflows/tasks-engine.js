@@ -42,8 +42,9 @@ const UNSAFE_PATH = /["$`\\!]|[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 const OTHER_SPACE = /(?! )\s/;
 const STOPPED_MAX = 300;
 // How long a successful `sync` keeps the run lock fresh. The runtime throws on reading the clock or
-// asking for random numbers, so freshness is tracked with a timer of this length.
-const REFRESH_MS = 10 * 60 * 1000;
+// asking for random numbers, so freshness is tracked with a timer of this length. The lock goes stale
+// after six hours and every refresh is an agent call, so 30 minutes keeps a wide margin cheaply.
+const REFRESH_MS = 30 * 60 * 1000;
 
 // ---- arguments (all checks happen before the first agent call) ---------------------------------
 
@@ -780,6 +781,14 @@ async function syncIdle() {
   while (syncing !== null) await syncing;
 }
 
+// The `sync` arguments: the run id, then the ids this run already knows, which the helper leaves out
+// of its answer. `learn` skips a known id anyway, so the answer only has to carry new tasks, and a
+// heartbeat answer stays short instead of listing the whole ledger for the relay to copy every time.
+function syncArgs() {
+  const known = [...tasks.keys()].filter(id => TASK_ID.test(id));
+  return known.length > 0 ? [runId, 'known', known.join(',')] : [runId];
+}
+
 // Returns whether the `sync` succeeded. `label` names a failure in the log. A `sync` is in progress
 // from the moment its helper call is made (at once when the serialised helper path is idle, else when
 // its turn comes) until its answer has been taken in; the helper path never runs two at once.
@@ -795,7 +804,7 @@ async function syncTasks(label = 'sync') {
     // The run id lets the helper refresh the lock only while it still names this run.
     answer = await serialised(() => {
       syncing = settled;
-      return runOps(opsLine('sync', [runId]));
+      return runOps(opsLine('sync', syncArgs()));
     });
     if (answer.ok) {
       refreshDue = false;
