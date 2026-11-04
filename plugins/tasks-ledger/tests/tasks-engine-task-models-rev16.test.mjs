@@ -107,3 +107,18 @@ test('helper: a ledger naming any other model is refused', t => {
     assert.match(r.error, new RegExp(`invalid ${field} .* of T1: expected one of haiku, sonnet, opus`));
   }
 });
+
+test('the engine meta is a pure literal (the Workflow tool refuses any expression in it)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../workflows/tasks-engine.js', import.meta.url), 'utf8');
+  const block = /export const meta = \{([\s\S]*?)\n\};/.exec(source);
+  assert.ok(block, 'meta block found');
+  const code = block[1]
+    .replace(/^\s*\/\/.*$/gm, '')
+    .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
+    .replace(/"(?:[^"\\\n]|\\.)*"/g, "''");
+  assert.doesNotMatch(code, /[+`$()]/, 'no joins, templates or calls in meta');
+  for (const line of code.split('\n').filter(l => l.trim())) {
+    assert.match(line, /^\s*[A-Za-z_]+: ''[,]?\s*$/, `one literal per key: ${line.trim()}`);
+  }
+});

@@ -1,9 +1,7 @@
 export const meta = {
   name: 'tasks-engine',
-  description:
-    'Runs a tasks-ledger run to completion: one implementer per task in its own worktree, ' +
-    'verify.cmd and an independent reviewer per task, local merges into the integration branch, ' +
-    'and draft PRs only when the ledger asks for them.',
+  // A pure literal: the Workflow tool refuses a meta built with any expression (no `+` joins).
+  description: 'Runs a tasks-ledger run to completion: one implementer per task in its own worktree, verify.cmd and an independent reviewer per task, local merges into the integration branch, and draft PRs only when the ledger asks for them.',
 };
 
 // tasks-engine workflow. The body runs with the injected `args`, `agent`, `phase` and `log`; it has
