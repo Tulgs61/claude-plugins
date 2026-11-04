@@ -74,7 +74,7 @@ export const GOOD_REVIEW = { verdict: 'verified', acceptance_met: true, scope_ok
 // answer line of the n-th call of `op` into the stdout the ops agent hands back (default: as is).
 // `taskAgent(prompt, options)`, when given, answers every implementer and reviewer call instead of
 // the canned answers, so a test can hold agents open and count them.
-export async function runEngine(records, { answers = {}, relay = (_op, _n, line) => line, taskAgent } = {}) {
+export async function runEngine(records, { answers = {}, relay = (_op, _n, line) => line, taskAgent, extraArgs = {} } = {}) {
   const run = new AsyncFunction('args', 'agent', 'phase', 'log', body);
   const opsLines = [];
   const prompts = [];
@@ -106,7 +106,7 @@ export async function runEngine(records, { answers = {}, relay = (_op, _n, line)
     return { stdout: relay(op, counts[op], sealed(payload), payload) };
   };
   const opsCalls = [];
-  const args = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId: 'test1' };
+  const args = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId: 'test1', ...extraArgs };
   const result = await run(args, agent, () => {}, message => logs.push(message));
   return { result, opsLines, opsCalls, prompts, logs, counts };
 }

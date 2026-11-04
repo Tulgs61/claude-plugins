@@ -120,6 +120,11 @@ Plugin agents are namespaced by the plugin name, so the workflow starts `tasks-l
 | `implementerAgent` | `tasks-ledger:task-implementer` | Agent type started once per task (and once more on a verification retry). |
 | `reviewerAgent` | `tasks-ledger:reviewer` | Agent type that reviews each task's diff; it must answer with the JSON verdict the workflow asks for. |
 
+One more optional arg changes what a failure does: `keepGoing: true` lets the run continue past a blocked
+task (tasks that do not depend on it keep starting; its dependents stay `todo`). The default `false` stops
+new starts at the first failure. `keepGoing` suits failures specific to one task; a shared one (a broken
+verify command, a failing helper) would block every independent task in turn.
+
 A workflow's `agent()` call matches its agent type exactly (verified against Claude Code 2.1.265): a bare
 name such as `reviewer` reaches a project (`.claude/agents/`) or user (`~/.claude/agents/`) agent of that
 name and never this plugin's own agent. That is why the defaults are plugin-scoped. Pass a bare name such

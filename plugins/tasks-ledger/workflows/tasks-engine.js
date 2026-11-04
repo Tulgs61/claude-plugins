@@ -74,6 +74,12 @@ if (typeof args.takeover === 'string' && !RUN_ID.test(args.takeover)) {
   throw new Error(`args.takeover must match ${RUN_ID.source}`);
 }
 const takeoverArgs = typeof args.takeover === 'string' ? ['takeover', args.takeover] : args.takeover ? ['takeover'] : [];
+// `true`: a failed task does not stop the run. Tasks that do not depend on it keep starting; its
+// dependents stay `todo`. Default: the first failure stops new starts and the running tasks finish.
+if (args.keepGoing !== undefined && typeof args.keepGoing !== 'boolean') {
+  throw new Error('args.keepGoing must be true or false');
+}
+const keepGoing = args.keepGoing === true;
 
 // ---- helper calls ------------------------------------------------------------------------------
 
@@ -819,7 +825,8 @@ if (agentsError !== null) stopped = stopped === null ? agentsError : `${agentsEr
 phase('run tasks');
 try {
   while (!badStart && agentsError === null) {
-    if (stopped === null) {
+    // Inside this loop `stopped` is only set by a failed task (badStart and agentsError never enter it).
+    if (stopped === null || keepGoing) {
       // `running` grows inside this loop, so two tasks that become ready together never overlap, and
       // no more than `maxParallel` start; a task waiting for a free slot starts when one frees up.
       for (const t of tasks.values()) if (running.size < maxParallel && !running.has(t.id) && ready(t)) start(t);
@@ -829,7 +836,7 @@ try {
       await syncTasks(); // also refreshes the run lock
       continue;
     }
-    if (stopped !== null) break;
+    if (stopped !== null && !keepGoing) break;
     await syncTasks();
     if (![...tasks.values()].some(ready)) break;
   }

@@ -58,6 +58,10 @@ version `<version>` is tagged `<name>--v<version>`.
 
 #### Added
 
+- Engine argument `keepGoing` (default `false`). With `true`, a blocked task no longer stops the run:
+  tasks that do not depend on it keep starting, its dependents stay `todo`, and the run ends as
+  `stopped` with every blocked task in `blocked`. Without it, the first failure still stops new starts.
+
 - `scripts/ops-detach.js` runs `verify` and `merge` detached and lets the ops agent wait for them in
   slices of at most 9 minutes. A repository check that takes longer than the Bash tool's 10-minute
   foreground limit no longer gets killed half-way through a merge. The runner keeps a heartbeat file
