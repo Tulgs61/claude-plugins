@@ -32,6 +32,10 @@
       "description": "How many tasks the engine runs at once; 3 when absent."
     },
     "prs": { "type": "boolean" },
+    "removeWorktreeAfterMerge": {
+      "type": "boolean",
+      "description": "Remove a task's worktree once it is merged (the branch stays); off when absent."
+    },
     "runStatus": { "type": "string", "enum": ["finished", "planned", "running", "stopped"] },
     "setup": {
       "type": "string",

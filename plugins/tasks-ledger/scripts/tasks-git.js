@@ -324,6 +324,9 @@ function validateLedger(L) {
   if (L.maxParallel !== undefined && !(Number.isInteger(L.maxParallel) && L.maxParallel >= 1 && L.maxParallel <= MAX_PARALLEL)) {
     fail(`invalid maxParallel ${JSON.stringify(L.maxParallel)}: expected an integer from 1 to ${MAX_PARALLEL}`);
   }
+  if (L.removeWorktreeAfterMerge !== undefined && typeof L.removeWorktreeAfterMerge !== 'boolean') {
+    fail(`invalid removeWorktreeAfterMerge ${JSON.stringify(L.removeWorktreeAfterMerge)}: expected true or false`);
+  }
   for (const t of L.tasks) {
     if (!t || typeof t !== 'object' || typeof t.id !== 'string' || !ID_RE.test(t.id)) {
       fail(`invalid task id ${t && typeof t === 'object' ? String(t.id) : String(t)}: unsafe for paths and git, must match ${ID_RE}`);
@@ -1459,7 +1462,33 @@ function mergeUnderLock(ctx, id, intBranch, integration) {
 
   const sha = gitOk(integration, 'rev-parse', '--short', 'HEAD');
   markMerged(ctx, id, `merged into ${intBranch} @ ${sha}; checks: ${checks.join(', ') || 'none'}`);
-  return { id, sha };
+  return { id, sha, ...removeMergedWorktree(ctx, id, branch) };
+}
+
+// With the ledger's `removeWorktreeAfterMerge`, a merged task's worktree goes (its build output can be
+// gigabytes); the branch stays, so dependants still start from it and `worktree` re-adds it on demand.
+// A worktree with uncommitted changes to tracked files is kept, and so is one git cannot remove (a
+// file held open by an editor): the merge itself has already succeeded, so neither fails the call.
+function removeMergedWorktree(ctx, id, branch) {
+  if (ctx.L.removeWorktreeAfterMerge !== true) return {};
+  const worktree = worktreeOfBranch(ctx.root, branch);
+  if (!worktree) return {};
+  const keep = reason => {
+    updateLedger(ctx, () => {
+      const t = findTask(ctx, id);
+      t.evidence = appendEvidence(t.evidence, `worktree kept: ${reason}`);
+    });
+    return { worktreeKept: reason };
+  };
+  if (gitOk(worktree, 'status', '--porcelain', '--untracked-files=no')) return keep('uncommitted changes to tracked files');
+  const removed = git(ctx.root, 'worktree', 'remove', '--force', worktree);
+  if (removed.status !== 0) return keep(`git worktree remove failed: ${(removed.stdout + removed.stderr).trim()}`);
+  updateLedger(ctx, () => {
+    const t = findTask(ctx, id);
+    t.worktree = null;
+    t.evidence = appendEvidence(t.evidence, `worktree removed after the merge: ${worktree}`);
+  });
+  return { worktreeRemoved: worktree };
 }
 
 // ---- prs ---------------------------------------------------------------------------------------
