@@ -77,6 +77,15 @@ The workflow runs at most 3 tasks at once. A ledger can set its own limit with t
 `maxParallel` (an integer from 1 to 16). Tasks with overlapping `files` never run together, whatever
 the limit. A ready task waiting for a free slot starts as soon as one of the running tasks ends.
 
+### Removing worktrees after a merge
+
+Set `"removeWorktreeAfterMerge": true` at the top level of the ledger (boolean, default `false`) to remove
+a task's worktree as soon as the task merges; build output can take gigabytes. The task branch stays, so
+a dependant still starts from it. The `merge` answer then carries `worktreeRemoved` (the removed path) or
+`worktreeKept` (the reason it stayed, also recorded in the task's evidence). A worktree with tracked or
+untracked changes, or one git cannot remove (a file held open by an editor), is kept; the merge itself
+still succeeds. Only ignored files go with the worktree, and the removal never uses `--force`.
+
 ### Cleanup
 
 A run leaves its task worktrees under `.claude/worktrees/`, the local `task/<topic>/<Tn>` and

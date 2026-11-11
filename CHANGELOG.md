@@ -89,6 +89,12 @@ version `<version>` is tagged `<name>--v<version>`.
 - Review fix rounds: a rejected review (or a `verified` one with a high finding) sends the task back to
   its implementer with the findings, in the same worktree, up to two times; each round is verified and
   reviewed again, and the next rejection blocks the task. `needs_input` still blocks at once.
+- Ledger option `removeWorktreeAfterMerge` (boolean, default `false`). With `true`, a task's worktree is
+  removed after the task merges (its build output can be gigabytes); the task branch stays, so
+  dependants still start from it. The `merge` answer carries `worktreeRemoved` (the path) or
+  `worktreeKept` (the reason). A worktree with tracked or untracked changes, or one git cannot remove,
+  is kept and the merge still succeeds; only ignored files go with the worktree, and the removal never
+  uses `--force`.
 
 #### Changed
 
