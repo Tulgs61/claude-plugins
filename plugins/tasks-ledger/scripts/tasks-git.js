@@ -1467,8 +1467,10 @@ function mergeUnderLock(ctx, id, intBranch, integration) {
 
 // With the ledger's `removeWorktreeAfterMerge`, a merged task's worktree goes (its build output can be
 // gigabytes); the branch stays, so dependants still start from it and `worktree` re-adds it on demand.
-// A worktree with uncommitted changes to tracked files is kept, and so is one git cannot remove (a
-// file held open by an editor): the merge itself has already succeeded, so neither fails the call.
+// A worktree with any uncommitted change, tracked or untracked, is kept, and so is one git cannot remove
+// (a file held open by an editor): the merge itself has already succeeded, so neither fails the call.
+// Only ignored files (build output) go with the worktree; the removal is a plain `git worktree remove`,
+// never `--force`, so git itself also refuses a worktree with changes.
 function removeMergedWorktree(ctx, id, branch) {
   if (ctx.L.removeWorktreeAfterMerge !== true) return {};
   const worktree = worktreeOfBranch(ctx.root, branch);
@@ -1480,8 +1482,8 @@ function removeMergedWorktree(ctx, id, branch) {
     });
     return { worktreeKept: reason };
   };
-  if (gitOk(worktree, 'status', '--porcelain', '--untracked-files=no')) return keep('uncommitted changes to tracked files');
-  const removed = git(ctx.root, 'worktree', 'remove', '--force', worktree);
+  if (gitOk(worktree, 'status', '--porcelain', '--untracked-files=normal')) return keep('uncommitted or untracked changes');
+  const removed = git(ctx.root, 'worktree', 'remove', worktree);
   if (removed.status !== 0) return keep(`git worktree remove failed: ${(removed.stdout + removed.stderr).trim()}`);
   updateLedger(ctx, () => {
     const t = findTask(ctx, id);

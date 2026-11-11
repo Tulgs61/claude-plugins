@@ -1,6 +1,6 @@
 // Rev 20: the ledger's `removeWorktreeAfterMerge` removes a merged task's worktree (the branch stays, so a
-// dependant still starts from it); a worktree with uncommitted tracked changes is kept with a reason, and
-// without the flag nothing changes.
+// dependant still starts from it); a worktree with uncommitted tracked or untracked changes is kept with a
+// reason (ignored build output does not count and goes with the worktree), and without the flag nothing changes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, writeFileSync } from 'node:fs';
@@ -14,7 +14,8 @@ test('a merged task loses its worktree and keeps its branch', t => {
   const sb = sandbox(t, { tasks: [task('T1', ['a/**']), task('T2', ['b/**'], ['T1'])], ledgerExtra: { removeWorktreeAfterMerge: true } });
   sb.ok('prepare', 'run-one');
   const w = sb.ok('worktree', 'T1').worktree;
-  writeFileSync(path.join(w, 'build.log'), 'untracked build output\n');
+  sb.commit(w, '.gitignore', '*.log\n', 'T1: ignore build output');
+  writeFileSync(path.join(w, 'build.log'), 'ignored build output\n');
   sb.commit(w, 'T1.txt', 'T1\n', 'T1: work');
   sb.ok('status', 'T1', 'verified', 'reviewed');
   const r = sb.ok('merge', 'T1');
@@ -37,6 +38,20 @@ test('a worktree with uncommitted tracked changes is kept', t => {
   const r = sb.ok('merge', 'T1');
   assert.match(r.worktreeKept, /uncommitted/);
   assert.equal(existsSync(w), true);
+});
+
+test('a worktree with an untracked, non-ignored file is kept', t => {
+  const sb = sandbox(t, { tasks: [task('T1', ['a/**'])], ledgerExtra: { removeWorktreeAfterMerge: true } });
+  sb.ok('prepare', 'run-one');
+  const w = sb.ok('worktree', 'T1').worktree;
+  sb.commit(w, 'T1.txt', 'T1\n', 'T1: work');
+  sb.ok('status', 'T1', 'verified', 'reviewed');
+  writeFileSync(path.join(w, 'notes.txt'), 'untracked work\n');
+  const r = sb.ok('merge', 'T1');
+  assert.match(r.worktreeKept, /untracked/);
+  assert.equal(r.worktreeRemoved, undefined);
+  assert.equal(existsSync(path.join(w, 'notes.txt')), true);
+  assert.match(sb.taskOf('T1').evidence, /worktree kept: /);
 });
 
 test('without the flag the worktree stays', t => {
