@@ -3,7 +3,7 @@
 // reason (ignored build output does not count and goes with the worktree), and without the flag nothing changes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { TOPIC, sandbox, task } from './helpers/git-sandbox.mjs';
 
@@ -81,4 +81,40 @@ test('a non-boolean flag is refused', t => {
   const r = sb.run('prepare', 'run-one');
   assert.equal(r.ok, false);
   assert.match(r.error, /removeWorktreeAfterMerge/);
+});
+
+test('a worktree on the task branch outside .claude/worktrees is kept', t => {
+  const sb = sandbox(t, { tasks: [task('T1', ['a/**'])], ledgerExtra: { removeWorktreeAfterMerge: true } });
+  sb.ok('prepare', 'run-one');
+  const made = sb.ok('worktree', 'T1').worktree;
+  const outside = path.join(sb.tmp, 'by-hand');
+  sb.git(sb.repo, 'worktree', 'move', made, outside);
+  sb.commit(outside, 'T1.txt', 'T1\n', 'T1: work');
+  sb.ok('status', 'T1', 'verified', 'reviewed');
+  const r = sb.ok('merge', 'T1');
+  assert.equal(r.worktreeKept, 'outside .claude/worktrees');
+  assert.equal(r.worktreeRemoved, undefined);
+  assert.equal(existsSync(outside), true);
+  assert.match(sb.taskOf('T1').evidence, /worktree kept: outside \.claude\/worktrees/);
+});
+
+// git cannot delete a file inside a read-only directory: `git worktree remove` deletes what it can and
+// the registration, then exits non-zero, leaving a plain folder.
+test('a half-failed removal clears the task worktree and reports the leftover', { skip: process.platform === 'win32' }, t => {
+  const sb = sandbox(t, { tasks: [task('T1', ['a/**'])], ledgerExtra: { removeWorktreeAfterMerge: true } });
+  sb.ok('prepare', 'run-one');
+  const w = sb.ok('worktree', 'T1').worktree;
+  sb.commit(w, '.gitignore', 'locked/\n', 'T1: ignore locked');
+  const dir = path.join(w, 'locked');
+  mkdirSync(dir);
+  writeFileSync(path.join(dir, 'held.txt'), 'ignored\n');
+  chmodSync(dir, 0o555);
+  t.after(() => { try { chmodSync(dir, 0o755); } catch {} });
+  sb.commit(w, 'T1.txt', 'T1\n', 'T1: work');
+  sb.ok('status', 'T1', 'verified', 'reviewed');
+  const r = sb.ok('merge', 'T1');
+  assert.equal(path.normalize(r.worktreeLeftover), path.normalize(w));
+  assert.equal(path.normalize(r.worktreeRemoved), path.normalize(w));
+  assert.equal(sb.taskOf('T1').worktree, null);
+  assert.match(sb.taskOf('T1').evidence, /partly removed/);
 });
