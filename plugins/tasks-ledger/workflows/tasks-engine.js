@@ -719,8 +719,9 @@ async function driveTask(t) {
     if (review.verdict === 'needs_input' || round >= REVIEW_FIX_ROUNDS) return block(t, note, true, true);
     log(`${t.id}: ${note}; fix round ${round + 1} of ${REVIEW_FIX_ROUNDS}`);
     const fixed = await implementAndVerify(null, review);
-    // `reviewed`: the helper records the head the reviewer rejected, so a restart of an unchanged
-    // head (a fix round that never committed) goes to the implementer, never straight back to review.
+    // block(.., failure, reviewed = true): the helper records the task branch's head as it is now.
+    // That is the rejected head if the fix round committed nothing, else the fix round's unreviewed
+    // commits; either way a restart of that unchanged head goes to the implementer, not to review.
     if (fixed.note) return block(t, `${fixed.note} (fix round ${round + 1} after: ${note})`, true, true);
     checked = fixed;
   }
