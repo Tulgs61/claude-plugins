@@ -92,9 +92,11 @@ version `<version>` is tagged `<name>--v<version>`.
 - Ledger option `removeWorktreeAfterMerge` (boolean, default `false`). With `true`, a task's worktree is
   removed after the task merges (its build output can be gigabytes); the task branch stays, so
   dependants still start from it. The `merge` answer carries `worktreeRemoved` (the path) or
-  `worktreeKept` (the reason). A worktree with tracked or untracked changes, or one git cannot remove,
-  is kept and the merge still succeeds; only ignored files go with the worktree, and the removal never
-  uses `--force`.
+  `worktreeKept` (the reason). A worktree with tracked or untracked changes, whose status cannot be
+  read, or that git refuses to remove is kept and the merge still succeeds. Ignored files, including
+  ones ignored by global excludes such as `.env`, go with the worktree without a warning, and the
+  removal never uses `--force`. When git's removal fails half way (a file held open), the answer also
+  carries `worktreeLeftover`: the folder is left but is no longer a worktree.
 
 #### Changed
 

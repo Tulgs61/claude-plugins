@@ -83,8 +83,13 @@ Set `"removeWorktreeAfterMerge": true` at the top level of the ledger (boolean, 
 a task's worktree as soon as the task merges; build output can take gigabytes. The task branch stays, so
 a dependant still starts from it. The `merge` answer then carries `worktreeRemoved` (the removed path) or
 `worktreeKept` (the reason it stayed, also recorded in the task's evidence). A worktree with tracked or
-untracked changes, or one git cannot remove (a file held open by an editor), is kept; the merge itself
-still succeeds. Only ignored files go with the worktree, and the removal never uses `--force`.
+untracked changes, whose status cannot be read, or that git refuses to remove (locked) is kept; the merge
+itself still succeeds. Ignored files, including ones ignored by global excludes such as `.env` or local
+settings, go with the worktree without a warning. The removal never uses `--force`. If git's removal
+fails half way (a file held open by an editor), the folder that is left is no longer a worktree: the
+answer carries `worktreeRemoved` and `worktreeLeftover` (the path), and the task's evidence says so.
+A later `worktree <Tn>` for that task fails while the leftover folder exists (`git worktree add`
+refuses a non-empty path): delete the folder first.
 
 ### Cleanup
 

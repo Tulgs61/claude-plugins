@@ -54,6 +54,20 @@ test('a worktree with an untracked, non-ignored file is kept', t => {
   assert.match(sb.taskOf('T1').evidence, /worktree kept: /);
 });
 
+test('a locked worktree is refused by git and kept', t => {
+  const sb = sandbox(t, { tasks: [task('T1', ['a/**'])], ledgerExtra: { removeWorktreeAfterMerge: true } });
+  sb.ok('prepare', 'run-one');
+  const w = sb.ok('worktree', 'T1').worktree;
+  sb.commit(w, 'T1.txt', 'T1\n', 'T1: work');
+  sb.ok('status', 'T1', 'verified', 'reviewed');
+  sb.git(sb.repo, 'worktree', 'lock', w);
+  const r = sb.ok('merge', 'T1');
+  assert.match(r.worktreeKept, /git worktree remove failed/);
+  assert.equal(r.worktreeRemoved, undefined);
+  assert.equal(existsSync(w), true);
+  assert.equal(sb.taskOf('T1').status, 'merged');
+});
+
 test('without the flag the worktree stays', t => {
   const sb = sandbox(t, { tasks: [task('T1', ['a/**'])] });
   sb.ok('prepare', 'run-one');

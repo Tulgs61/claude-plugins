@@ -1467,10 +1467,14 @@ function mergeUnderLock(ctx, id, intBranch, integration) {
 
 // With the ledger's `removeWorktreeAfterMerge`, a merged task's worktree goes (its build output can be
 // gigabytes); the branch stays, so dependants still start from it and `worktree` re-adds it on demand.
-// A worktree with any uncommitted change, tracked or untracked, is kept, and so is one git cannot remove
-// (a file held open by an editor): the merge itself has already succeeded, so neither fails the call.
-// Only ignored files (build output) go with the worktree; the removal is a plain `git worktree remove`,
-// never `--force`, so git itself also refuses a worktree with changes.
+// A worktree with any uncommitted change, tracked or untracked, is kept, and so is one whose status
+// cannot be read or that git refuses to remove (locked): the merge itself has already succeeded, so
+// none of these fails the call. Only ignored files (build output, and files ignored by global excludes
+// such as a local .env) go with the worktree, without a warning; the removal is a plain
+// `git worktree remove`, never `--force`, so git itself also refuses a worktree with changes.
+// A remove that fails half way (a file held open: git deletes the rest and the registration, then
+// exits non-zero) leaves a plain folder that is no longer a worktree: the task's worktree is cleared
+// and the answer carries `worktreeLeftover` (that folder) next to `worktreeRemoved`.
 function removeMergedWorktree(ctx, id, branch) {
   if (ctx.L.removeWorktreeAfterMerge !== true) return {};
   const worktree = worktreeOfBranch(ctx.root, branch);
@@ -1482,9 +1486,20 @@ function removeMergedWorktree(ctx, id, branch) {
     });
     return { worktreeKept: reason };
   };
-  if (gitOk(worktree, 'status', '--porcelain', '--untracked-files=normal')) return keep('uncommitted or untracked changes');
+  const status = git(worktree, 'status', '--porcelain', '--untracked-files=normal');
+  if (status.status !== 0) return keep(`git status failed: ${(status.stdout + status.stderr).trim()}`);
+  if (status.stdout.trim()) return keep('uncommitted or untracked changes');
   const removed = git(ctx.root, 'worktree', 'remove', worktree);
-  if (removed.status !== 0) return keep(`git worktree remove failed: ${(removed.stdout + removed.stderr).trim()}`);
+  if (removed.status !== 0) {
+    const output = (removed.stdout + removed.stderr).trim();
+    if (worktreeOfBranch(ctx.root, branch)) return keep(`git worktree remove failed: ${output}`);
+    updateLedger(ctx, () => {
+      const t = findTask(ctx, id);
+      t.worktree = null;
+      t.evidence = appendEvidence(t.evidence, `worktree partly removed, leftover ${worktree}: ${output}`);
+    });
+    return { worktreeRemoved: worktree, worktreeLeftover: worktree };
+  }
   updateLedger(ctx, () => {
     const t = findTask(ctx, id);
     t.worktree = null;
