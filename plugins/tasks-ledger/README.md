@@ -82,7 +82,9 @@ the limit. A ready task waiting for a free slot starts as soon as one of the run
 Set `"removeWorktreeAfterMerge": true` at the top level of the ledger (boolean, default `false`) to remove
 a task's worktree as soon as the task merges; build output can take gigabytes. The task branch stays, so
 a dependant still starts from it. The `merge` answer then carries `worktreeRemoved` (the removed path) or
-`worktreeKept` (the reason it stayed, also recorded in the task's evidence). A worktree with tracked or
+`worktreeKept` (the reason it stayed, also recorded in the task's evidence). Only a worktree inside
+`<root>/.claude/worktrees` is removed; one on the task branch elsewhere (made by hand) is kept with the
+reason `outside .claude/worktrees`, like `cleanup` does. A worktree with tracked or
 untracked changes, whose status cannot be read, or that git refuses to remove (locked) is kept; the merge
 itself still succeeds. Ignored files, including ones ignored by global excludes such as `.env` or local
 settings, go with the worktree without a warning. The removal never uses `--force`. If git's removal

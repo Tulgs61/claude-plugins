@@ -54,6 +54,15 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ## tasks-ledger
 
+### [0.7.1] - 2026-11-11
+
+#### Fixed
+
+- `removeWorktreeAfterMerge` removed any worktree on the task branch, including one made by hand outside
+  `.claude/worktrees/`, together with its ignored files (a local `.env`). It now removes only worktrees
+  inside `<root>/.claude/worktrees` (the rule `cleanup` already used) and keeps the others with the reason
+  `outside .claude/worktrees`.
+
 ### [0.7.0] - 2026-11-03
 
 #### Added

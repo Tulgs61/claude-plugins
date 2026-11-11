@@ -190,6 +190,23 @@ function worktrees(root) {
   return list;
 }
 
+// The real path of `p`, or for a path that does not exist that of its nearest existing parent with
+// the rest appended, so a missing worktree compares like an existing one.
+function realOrSelf(p) {
+  let head = path.resolve(p);
+  const rest = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(head), ...rest);
+    } catch {
+      const up = path.dirname(head);
+      if (up === head) return path.resolve(p);
+      rest.unshift(path.basename(head));
+      head = up;
+    }
+  }
+}
+
 function worktreeOfBranch(root, branch) {
   const w = worktrees(root).find(x => x.branch === branch && fs.existsSync(x.path));
   return w ? w.path : null;
@@ -1467,7 +1484,8 @@ function mergeUnderLock(ctx, id, intBranch, integration) {
 
 // With the ledger's `removeWorktreeAfterMerge`, a merged task's worktree goes (its build output can be
 // gigabytes); the branch stays, so dependants still start from it and `worktree` re-adds it on demand.
-// A worktree with any uncommitted change, tracked or untracked, is kept, and so is one whose status
+// Only a worktree inside `<root>/.claude/worktrees` is removed (`worktreeKept` says "outside
+// .claude/worktrees" otherwise, like `cleanup`'s `outside`). A worktree with any uncommitted change, tracked or untracked, is kept, and so is one whose status
 // cannot be read or that git refuses to remove (locked): the merge itself has already succeeded, so
 // none of these fails the call. Only ignored files (build output, and files ignored by global excludes
 // such as a local .env) go with the worktree, without a warning; the removal is a plain
@@ -1486,6 +1504,10 @@ function removeMergedWorktree(ctx, id, branch) {
     });
     return { worktreeKept: reason };
   };
+  // Only a worktree this tool made (inside <root>/.claude/worktrees) is removed, as `cleanup` does: one
+  // a person added by hand elsewhere may hold files that exist nowhere else (an ignored .env).
+  const rel = path.relative(realOrSelf(path.join(ctx.root, '.claude', 'worktrees')), realOrSelf(worktree));
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return keep('outside .claude/worktrees');
   const status = git(worktree, 'status', '--porcelain', '--untracked-files=normal');
   if (status.status !== 0) return keep(`git status failed: ${(status.stdout + status.stderr).trim()}`);
   if (status.stdout.trim()) return keep('uncommitted or untracked changes');
@@ -1685,22 +1707,6 @@ function cleanupUnderLock(ctx, dryRun) {
   const isAncestor = (sha, ref) => git(root, 'merge-base', '--is-ancestor', sha, ref).status === 0;
   const inBase = sha => baseRefs.some(ref => isAncestor(sha, ref));
 
-  // The real path of `p`, or for a path that does not exist that of its nearest existing parent with
-  // the rest appended, so a missing worktree compares like an existing one.
-  const realOrSelf = p => {
-    let head = path.resolve(p);
-    const rest = [];
-    for (;;) {
-      try {
-        return path.join(fs.realpathSync(head), ...rest);
-      } catch {
-        const up = path.dirname(head);
-        if (up === head) return path.resolve(p);
-        rest.unshift(path.basename(head));
-        head = up;
-      }
-    }
-  };
   const worktreesDir = realOrSelf(path.join(root, '.claude', 'worktrees'));
   const inWorktreesDir = p => {
     const rel = path.relative(worktreesDir, realOrSelf(p));
