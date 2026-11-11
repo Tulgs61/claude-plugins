@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ENGINE, task } from './helpers/git-sandbox.mjs';
-import { fakeRelay } from './helpers/relay.mjs';
+import { fakeRelay, opsCommand } from './helpers/relay.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const body = readFileSync(ENGINE, 'utf8').replace(/^export\s+/m, '');
@@ -37,7 +37,7 @@ async function runEngine(ledgerTasks, { answers = {}, review = GOOD_REVIEW } = {
       reviewerPrompts.push(prompt);
       return review;
     }
-    const cmd = prompt.match(/node "[^"]*" (.*)\n/)[1].replace(/"/g, '');
+    const cmd = opsCommand(prompt).replace(/"/g, '');
     commands.push(cmd);
     const [op, , id] = cmd.split(' ');
     return reply(op, id, canned[op] ? canned[op](id) : { ok: true });

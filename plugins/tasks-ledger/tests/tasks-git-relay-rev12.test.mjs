@@ -23,7 +23,7 @@ function scriptCheck(file) {
 }
 
 const SUMMARY_KEYS = ['base', 'branch', 'dependsOn', 'files', 'id', 'needsAcceptance', 'pr', 'status', 'worktree'];
-const RECORD_KEYS = ['acceptance', 'base', 'branch', 'budget', 'constraints', 'dependsOn', 'files', 'id', 'needsAcceptance', 'pr', 'proof', 'status', 'title', 'worktree'];
+const RECORD_KEYS = ['acceptance', 'base', 'branch', 'budget', 'constraints', 'dependsOn', 'files', 'id', 'model', 'needsAcceptance', 'pr', 'proof', 'reviewModel', 'status', 'title', 'worktree'];
 
 // The raw answer line of one helper call.
 function rawLine(sb, ...args) {
@@ -115,7 +115,7 @@ test('task returns one task\'s full dispatch record and errors for an unknown or
   assert.deepEqual(r.task, {
     constraints: ['keep the API', 'no new deps'], dependsOn: [], files: ['src/**'], acceptance: 'acceptance of T1', base: null,
     branch: null, budget: '5 turns', id: 'T1', pr: null, proof: 'true', status: 'todo', title: 'task T1', worktree: null,
-    needsAcceptance: false,
+    needsAcceptance: false, model: null, reviewModel: null,
   });
   const t2 = sb.ok('task', 'T2').task;
   assert.equal(t2.needsAcceptance, true);

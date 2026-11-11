@@ -17,10 +17,12 @@ const TASK_KEYS = [
 // The fields of the full record of one task (`task`) and of the short listing of every task. The
 // listing stays small: long relayed answers are the ones that get shortened.
 const RECORD_LISTS = ['constraints', 'dependsOn', 'files'];
-const RECORD_SCALARS = ['acceptance', 'base', 'branch', 'budget', 'id', 'pr', 'proof', 'status', 'title', 'worktree'];
+const RECORD_SCALARS = ['acceptance', 'base', 'branch', 'budget', 'id', 'model', 'pr', 'proof', 'reviewModel', 'status', 'title', 'worktree'];
 const SUMMARY_LISTS = ['dependsOn', 'files'];
 const SUMMARY_SCALARS = ['base', 'branch', 'id', 'pr', 'status', 'worktree'];
 const ID_RE = /^T[0-9]+$/;
+// The models a task may name for its implementer (`model`) and reviewer (`reviewModel`).
+const TASK_MODELS = ['haiku', 'sonnet', 'opus'];
 const INBOX_ID_RE = /^T[0-9]{1,9}$/;
 const TOPIC_RE = /^[a-z0-9][a-z0-9-]*$/;
 const RUN_ID_RE = /^[A-Za-z0-9-]{4,64}$/;
@@ -322,9 +324,17 @@ function validateLedger(L) {
   if (L.maxParallel !== undefined && !(Number.isInteger(L.maxParallel) && L.maxParallel >= 1 && L.maxParallel <= MAX_PARALLEL)) {
     fail(`invalid maxParallel ${JSON.stringify(L.maxParallel)}: expected an integer from 1 to ${MAX_PARALLEL}`);
   }
+  if (L.removeWorktreeAfterMerge !== undefined && typeof L.removeWorktreeAfterMerge !== 'boolean') {
+    fail(`invalid removeWorktreeAfterMerge ${JSON.stringify(L.removeWorktreeAfterMerge)}: expected true or false`);
+  }
   for (const t of L.tasks) {
     if (!t || typeof t !== 'object' || typeof t.id !== 'string' || !ID_RE.test(t.id)) {
       fail(`invalid task id ${t && typeof t === 'object' ? String(t.id) : String(t)}: unsafe for paths and git, must match ${ID_RE}`);
+    }
+    for (const k of ['model', 'reviewModel']) {
+      if (t[k] !== undefined && t[k] !== null && !TASK_MODELS.includes(t[k])) {
+        fail(`invalid ${k} ${JSON.stringify(t[k])} of ${t.id}: expected one of ${TASK_MODELS.join(', ')}`);
+      }
     }
     if (t.dependsOn !== undefined && t.dependsOn !== null) {
       if (!Array.isArray(t.dependsOn)) fail(`unsafe dependsOn of ${t.id}: not an array`);
@@ -1011,13 +1021,18 @@ function opFinish(ctx, [runStatus, reason, runId]) {
   return { runStatus, tasks: listing(ctx.L) };
 }
 
-function opStatus(ctx, [id, status, evidence]) {
+// status <id> <status> [evidence] [reviewed]: `reviewed` (with `blocked`) records the head of the
+// task branch a review judged, so a restart of that unchanged head is not sent straight back to review.
+function opStatus(ctx, [id, status, evidence, flag]) {
   findTask(ctx, id);
   if (!SETTABLE.includes(status)) fail(`status ${status} not settable: expected one of ${SETTABLE.join(', ')}`);
+  if (flag !== undefined && !(flag === 'reviewed' && status === 'blocked')) fail(`bad flag ${flag}: only blocked takes reviewed`);
+  const head = flag === 'reviewed' ? git(ctx.root, 'rev-parse', '-q', '--verify', `refs/heads/${taskBranch(ctx, id)}`) : null;
   updateLedger(ctx, () => {
     const t = findTask(ctx, id);
     t.status = status;
     if (evidence !== undefined) t.evidence = String(evidence).slice(0, EVIDENCE_MAX);
+    if (head && head.status === 0) t.reviewedHead = head.stdout.trim();
   });
   return { id, status };
 }
@@ -1030,13 +1045,24 @@ function opTask(ctx, [id]) {
 
 // Ingests the inbox and refreshes the lock under the guard, so overlapping calls process the inbox one after
 // the other from the ledger as the previous one left it.
-function opSync(ctx, [runId]) {
+// sync <runId> [known <T1,T2,...>]: `known` names the tasks the caller already has; they are left
+// out of `tasks`, so a heartbeat answer stays a few bytes long (the relay copies every byte of it).
+const KNOWN_IDS_RE = /^T[0-9]+(,T[0-9]+)*$/;
+function opSync(ctx, [runId, knownFlag, knownList, ...extra]) {
+  let known = new Set();
+  if (knownFlag !== undefined) {
+    if (knownFlag !== 'known' || typeof knownList !== 'string' || !KNOWN_IDS_RE.test(knownList) || extra.length > 0) {
+      fail(`bad sync arguments: expected known <T1,T2,...>, got ${JSON.stringify([knownFlag, knownList, ...extra])}`);
+    }
+    known = new Set(knownList.split(','));
+  }
   return withLockGuard(ctx, () => {
     refreshLockGuarded(ctx, runId);
     Object.assign(ctx, readLedgerFile(ctx.ledgerFile));
     const { added, consume } = ingestInbox(ctx);
     const warnings = consume(added.length ? persistLedger(ctx) : undefined);
-    return { added, tasks: listing(ctx.L), ...(warnings.length ? { warnings } : {}) };
+    const tasks = listing(ctx.L).filter(t => !known.has(t.id));
+    return { added, tasks, ...(warnings.length ? { warnings } : {}) };
   });
 }
 
@@ -1221,7 +1247,13 @@ function opWorktree(ctx, [id]) {
   }
 
   updateLedger(ctx, () => Object.assign(findTask(ctx, id), { status: 'in_progress', branch, base, worktree }));
-  return { id, branch, base, worktree };
+  // What a restarted task already has: its commits beyond the base, its head, and the head the last
+  // blocking review judged. The engine verifies an unreviewed branch before it starts an implementer.
+  const counted = git(worktree, 'rev-list', '--count', `${baseRefOf(ctx, t)}..HEAD`);
+  const commits = counted.status === 0 ? Number(counted.stdout.trim()) : 0;
+  const head = git(worktree, 'rev-parse', 'HEAD').stdout.trim();
+  const reviewedHead = typeof t.reviewedHead === 'string' ? t.reviewedHead : null;
+  return { id, branch, base, worktree, commits, head, reviewedHead };
 }
 
 function taskWorktree(ctx, t) {
@@ -1314,12 +1346,55 @@ function untrackedBlockers(output) {
   return paths;
 }
 
+// Runs `fn` while holding the merge lock of the integration worktree: a file in its git directory that
+// names the holding process. Every merge goes through the one integration worktree, and a detached merge
+// can outlive the call that started it, so a second merge (another run after a takeover, or a retry) must
+// never touch the worktree while the first one is alive. A lock whose process is gone, or that is older
+// than LOCK_TTL_MS, is taken over.
+function withMergeLock(integration, fn) {
+  const lockPath = path.join(gitOk(integration, 'rev-parse', '--absolute-git-dir'), 'tasks-ledger-merge.lock');
+  const take = () => {
+    const fd = fs.openSync(lockPath, 'wx');
+    fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    fs.closeSync(fd);
+  };
+  try {
+    take();
+  } catch (e) {
+    if (e.code !== 'EEXIST') throw e;
+    let holder = null;
+    try {
+      holder = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    } catch {
+      holder = null;
+    }
+    // A lock from before the machine last booted is dead whatever process now has its pid.
+    const bootedAt = Date.now() - os.uptime() * 1000;
+    const at = Number(holder && holder.at);
+    const live = holder && at > bootedAt && Date.now() - at < LOCK_TTL_MS && processAlive(holder.pid);
+    if (live) fail(`another merge is running in ${integration} (pid ${holder.pid}); try again when it has finished`, { locked: true });
+    fs.rmSync(lockPath, { force: true });
+    take();
+  }
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(lockPath, { force: true });
+  }
+}
+
 function opMerge(ctx, [id]) {
   const { L } = ctx;
-  const t = findTask(ctx, id);
   const intBranch = L.integrationBranch || integrationBranchName(ctx);
   const integration = worktreeOfBranch(ctx.root, intBranch);
   if (!integration) fail('integration worktree missing');
+  findTask(ctx, id);
+  return withMergeLock(integration, () => mergeUnderLock(ctx, id, intBranch, integration));
+}
+
+function mergeUnderLock(ctx, id, intBranch, integration) {
+  const { L } = ctx;
+  const t = findTask(ctx, id);
   const branch = taskBranch(ctx, id);
   const inIntegration = () => git(integration, 'merge-base', '--is-ancestor', branch, 'HEAD').status === 0;
   // A repeated call for a task already merged (the engine runs a command again when its relayed
@@ -1339,6 +1414,13 @@ function opMerge(ctx, [id]) {
     return { id, sha, already: true };
   }
 
+  // A merge an earlier call left half done is undone first. This call holds the merge lock, so no live
+  // merge owns it: its process was killed. `merge --abort` puts back what was there before that merge;
+  // any other change to tracked files is then refused below, as always.
+  if (git(integration, 'rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0) {
+    const aborted = git(integration, 'merge', '--abort');
+    if (aborted.status !== 0) fail(`${id}: a half-done merge in ${integration} could not be undone: ${(aborted.stdout + aborted.stderr).trim()}`);
+  }
   if (gitOk(integration, 'status', '--porcelain', '--untracked-files=no')) {
     fail(`integration worktree ${integration} has uncommitted changes to tracked files`);
   }
@@ -1380,7 +1462,50 @@ function opMerge(ctx, [id]) {
 
   const sha = gitOk(integration, 'rev-parse', '--short', 'HEAD');
   markMerged(ctx, id, `merged into ${intBranch} @ ${sha}; checks: ${checks.join(', ') || 'none'}`);
-  return { id, sha };
+  return { id, sha, ...removeMergedWorktree(ctx, id, branch) };
+}
+
+// With the ledger's `removeWorktreeAfterMerge`, a merged task's worktree goes (its build output can be
+// gigabytes); the branch stays, so dependants still start from it and `worktree` re-adds it on demand.
+// A worktree with any uncommitted change, tracked or untracked, is kept, and so is one whose status
+// cannot be read or that git refuses to remove (locked): the merge itself has already succeeded, so
+// none of these fails the call. Only ignored files (build output, and files ignored by global excludes
+// such as a local .env) go with the worktree, without a warning; the removal is a plain
+// `git worktree remove`, never `--force`, so git itself also refuses a worktree with changes.
+// A remove that fails half way (a file held open: git deletes the rest and the registration, then
+// exits non-zero) leaves a plain folder that is no longer a worktree: the task's worktree is cleared
+// and the answer carries `worktreeLeftover` (that folder) next to `worktreeRemoved`.
+function removeMergedWorktree(ctx, id, branch) {
+  if (ctx.L.removeWorktreeAfterMerge !== true) return {};
+  const worktree = worktreeOfBranch(ctx.root, branch);
+  if (!worktree) return {};
+  const keep = reason => {
+    updateLedger(ctx, () => {
+      const t = findTask(ctx, id);
+      t.evidence = appendEvidence(t.evidence, `worktree kept: ${reason}`);
+    });
+    return { worktreeKept: reason };
+  };
+  const status = git(worktree, 'status', '--porcelain', '--untracked-files=normal');
+  if (status.status !== 0) return keep(`git status failed: ${(status.stdout + status.stderr).trim()}`);
+  if (status.stdout.trim()) return keep('uncommitted or untracked changes');
+  const removed = git(ctx.root, 'worktree', 'remove', worktree);
+  if (removed.status !== 0) {
+    const output = (removed.stdout + removed.stderr).trim();
+    if (worktreeOfBranch(ctx.root, branch)) return keep(`git worktree remove failed: ${output}`);
+    updateLedger(ctx, () => {
+      const t = findTask(ctx, id);
+      t.worktree = null;
+      t.evidence = appendEvidence(t.evidence, `worktree partly removed, leftover ${worktree}: ${output}`);
+    });
+    return { worktreeRemoved: worktree, worktreeLeftover: worktree };
+  }
+  updateLedger(ctx, () => {
+    const t = findTask(ctx, id);
+    t.worktree = null;
+    t.evidence = appendEvidence(t.evidence, `worktree removed after the merge: ${worktree}`);
+  });
+  return { worktreeRemoved: worktree };
 }
 
 // ---- prs ---------------------------------------------------------------------------------------

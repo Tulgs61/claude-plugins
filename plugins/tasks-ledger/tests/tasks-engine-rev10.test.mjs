@@ -5,7 +5,7 @@ import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ENGINE, task } from './helpers/git-sandbox.mjs';
-import { fakeRelay } from './helpers/relay.mjs';
+import { fakeRelay, opsCommand } from './helpers/relay.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const body = readFileSync(ENGINE, 'utf8').replace(/^export\s+/m, '');
@@ -59,10 +59,10 @@ async function runEngine(ledgerTasks, opts = {}) {
         mock.timers.tick(agentMinutes * MINUTE);
       }
     }
-    const line = prompt.match(/node "[^"]*" (.*)\n/)[1];
+    const line = opsCommand(prompt);
     opsLines.push(line);
     events.push(line);
-    const [op, , ...rest] = line.replace(/"/g, '').split(' ');
+    const [op, , ...rest] = line.replace(/"/g, '').replace(/ known \S+$/, '').split(' '); // known ids: rev 19
     counts[op] = (counts[op] || 0) + 1;
     return reply(op, rest[0], canned[op] ? canned[op](...rest, counts[op]) : { ok: true });
   };
@@ -86,7 +86,7 @@ const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[
 // ---- amendment 1: lock refresh at agent boundaries ---------------------------------------------
 
 test('amendment 1: a refresh runs between two long agent calls, and right before and after each', async () => {
-  const { result, events } = await runEngine([task('T1', ['src/**'])], { agentMinutes: 11 });
+  const { result, events } = await runEngine([task('T1', ['src/**'])], { agentMinutes: 31 });
   assert.equal(result.stopped, null);
   const impl = events.indexOf('impl T1');
   const implDone = events.indexOf('impl T1 done');
@@ -96,10 +96,10 @@ test('amendment 1: a refresh runs between two long agent calls, and right before
   assert.ok(isSync(events[implDone + 1]), `sync right after the implementer:\n${events.join('\n')}`);
   assert.ok(events.slice(implDone + 1, review).some(isSync), 'a refresh between the two agent calls');
   assert.ok(isSync(events[reviewDone + 1]), `sync right after the reviewer:\n${events.join('\n')}`);
-  for (const e of events.filter(isSync)) assert.equal(e, 'sync "/tmp/ledger.json" test1');
+  for (const e of events.filter(isSync)) assert.equal(e, 'sync "/tmp/ledger.json" test1 known T1');
 });
 
-test('amendment 1: a refresh is skipped while the last successful sync is under 10 minutes old', async () => {
+test('amendment 1: a refresh is skipped while the last successful sync is under 30 minutes old', async () => {
   const { result, events } = await runEngine([task('T1', ['src/**'])], { agentMinutes: 4 });
   assert.equal(result.stopped, null);
   const impl = events.indexOf('impl T1');
@@ -116,11 +116,11 @@ test('amendment 1: a refresh is skipped while the last successful sync is under 
 test('amendment 1: tasks a refresh reports join the schedule, and a failed refresh does not stop the run', async () => {
   const added = task('T2', ['lib/**']);
   const { result, events, logs } = await runEngine([task('T1', ['src/**'])], {
-    agentMinutes: 11,
+    agentMinutes: 31,
     answers: { sync: (_runId, n) => (n === 1 ? { ok: true, tasks: [added] } : { ok: false, error: 'lock gone' }) },
   });
   // The first sync is the refresh right before T1's implementer.
-  assert.ok(events.indexOf('sync "/tmp/ledger.json" test1') < events.indexOf('impl T1'), events.join('\n'));
+  assert.ok(events.indexOf('sync "/tmp/ledger.json" test1 known T1') < events.indexOf('impl T1'), events.join('\n'));
   assert.equal(result.stopped, null);
   assert.deepEqual(result.results.map(r => `${r.id} ${r.status}`), ['T1 merged', 'T2 merged']);
   assert.ok(logs.some(l => /sync failed: lock gone/.test(l)), logs.join('\n'));
@@ -346,7 +346,7 @@ const failures = {
 
 for (const [name, spec] of Object.entries(failures)) {
   test(`amendment 9: ${name} blocks the task with a note`, async () => {
-    const { result, opsLines, events } = await runEngine([task('T1', ['src/**'])], { agentMinutes: 11, ...spec });
+    const { result, opsLines, events } = await runEngine([task('T1', ['src/**'])], { agentMinutes: 31, ...spec });
     assert.equal(result.results.length, 1);
     assert.equal(result.results[0].status, 'blocked');
     assert.match(result.results[0].note, spec.note);
@@ -364,7 +364,7 @@ for (const [name, spec] of Object.entries(failures)) {
 
 test('amendment 9: a refused status blocked call still blocks the task, with a note saying so', async () => {
   const { result } = await runEngine([task('T1', ['src/**'])], {
-    agentMinutes: 11,
+    agentMinutes: 31,
     answers: { status: () => ({ ok: false, error: 'ledger busy' }) },
   });
   assert.equal(result.results[0].status, 'blocked');
@@ -385,7 +385,7 @@ test('amendment 9: a task that becomes ready later is not started under an inval
 
 test('amendment 9: a stopped text from many unfinished tasks is cut to 300 characters', async () => {
   const ledger = Array.from({ length: 60 }, (_, i) => task(`T${i + 1}`, [`d${i}/**`], ['T999']));
-  const { result, opsLines } = await runEngine(ledger, { agentMinutes: 11 });
+  const { result, opsLines } = await runEngine(ledger, { agentMinutes: 31 });
   assert.match(result.stopped, /^unfinished tasks: T1 todo, T2 todo/);
   assert.equal(result.stopped.length, 300);
   assert.doesNotMatch(result.stopped, /[\n\r]/);

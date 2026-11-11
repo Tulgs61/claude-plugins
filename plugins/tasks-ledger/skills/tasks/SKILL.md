@@ -140,7 +140,10 @@ Edit tool only before the run starts, never while a run is live, and only after 
 again as under "Before a ledger edit"; the engine reads the object from
 the ledger on every start, so a resume needs nothing more. Passing `implementerAgent` or
 `reviewerAgent` as engine arguments still overrides the ledger; do that only when the user wants a
-different agent for this one start.
+different agent for this one start. A task's own `model` and `reviewModel` override the model of
+whichever implementer and reviewer type runs it, custom types included; without `reviewModel` the
+reviewer runs on the task's `model`. A rejected review gets up to two fix rounds by the implementer
+before the task blocks, so a task blocked by its review already failed three reviews (or asked for input).
 
 ## Resume
 
@@ -200,6 +203,9 @@ plugin directory, start it by its name `tasks-ledger:tasks-engine` instead. Its 
   that run id as a string, for example `"takeover": "run-20261004-120000-ab12"`; never `true`.
 - `runId` is new for every start and matches `^[A-Za-z0-9-]{4,64}$`, for example
   `run-20261004-153012-k3x9`.
+- Add `"keepGoing": true` when the user wants the run to continue past a blocked task (tasks that do
+  not depend on it keep starting). Without it the first failure stops new starts. It suits failures of
+  one task; when every task fails the same way (verify.cmd, the helper), fix that before resuming.
 - Agent types the user asked for are in the ledger's `agents` object (see "Agent types"). Add
   `implementerAgent` and/or `reviewerAgent` only when the user wants an override for this one start;
   they win over the ledger.

@@ -53,6 +53,14 @@ export function fakeRelay() {
   };
 }
 
+// The helper command line an ops prompt runs (`verify "<ledger>" T1`), from either prompt form: the
+// plain one (`node "<script>" <command>`) or the detached one for long commands
+// (`node "<ops-detach.js>" start "<out>" "<script>" <command>`).
+export function opsCommand(prompt) {
+  const detached = prompt.match(/node "[^"]*" start "[^"]*" "[^"]*" (.*)\n/);
+  return detached ? detached[1] : prompt.match(/node "[^"]*" (.*)\n/)[1];
+}
+
 // The engine run against a fake helper, shared by the relay tests. The engine path is resolved here,
 // not imported from git-sandbox.mjs, which imports this file.
 const ENGINE = fileURLToPath(new URL('../../workflows/tasks-engine.js', import.meta.url));
@@ -66,7 +74,7 @@ export const GOOD_REVIEW = { verdict: 'verified', acceptance_met: true, scope_ok
 // answer line of the n-th call of `op` into the stdout the ops agent hands back (default: as is).
 // `taskAgent(prompt, options)`, when given, answers every implementer and reviewer call instead of
 // the canned answers, so a test can hold agents open and count them.
-export async function runEngine(records, { answers = {}, relay = (_op, _n, line) => line, taskAgent } = {}) {
+export async function runEngine(records, { answers = {}, relay = (_op, _n, line) => line, taskAgent, extraArgs = {} } = {}) {
   const run = new AsyncFunction('args', 'agent', 'phase', 'log', body);
   const opsLines = [];
   const prompts = [];
@@ -89,14 +97,16 @@ export async function runEngine(records, { answers = {}, relay = (_op, _n, line)
       if (taskAgent) return taskAgent(prompt, options);
       return /^TASK: /.test(prompt) ? 'done' : GOOD_REVIEW;
     }
-    const line = prompt.match(/node "[^"]*" (.*)\n/)[1];
+    const line = opsCommand(prompt);
     opsLines.push(line);
-    const [op, , ...rest] = line.replace(/"/g, '').split(' ');
+    const [op, , ...rest] = line.replace(/"/g, '').replace(/ known \S+$/, '').split(' '); // known ids: rev 19
     counts[op] = (counts[op] || 0) + 1;
+    opsCalls.push({ op, prompt, options });
     const payload = canned[op] ? canned[op](...rest, counts[op]) : { ok: true };
     return { stdout: relay(op, counts[op], sealed(payload), payload) };
   };
-  const args = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId: 'test1' };
+  const opsCalls = [];
+  const args = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId: 'test1', ...extraArgs };
   const result = await run(args, agent, () => {}, message => logs.push(message));
-  return { result, opsLines, prompts, logs, counts };
+  return { result, opsLines, opsCalls, prompts, logs, counts };
 }

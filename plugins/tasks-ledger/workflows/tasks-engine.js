@@ -1,9 +1,7 @@
 export const meta = {
   name: 'tasks-engine',
-  description:
-    'Runs a tasks-ledger run to completion: one implementer per task in its own worktree, ' +
-    'verify.cmd and an independent reviewer per task, local merges into the integration branch, ' +
-    'and draft PRs only when the ledger asks for them.',
+  // A pure literal: the Workflow tool refuses a meta built with any expression (no `+` joins).
+  description: 'Runs a tasks-ledger run to completion: one implementer per task in its own worktree, verify.cmd and an independent reviewer per task, local merges into the integration branch, and draft PRs only when the ledger asks for them.',
 };
 
 // tasks-engine workflow. The body runs with the injected `args`, `agent`, `phase` and `log`; it has
@@ -16,6 +14,25 @@ const AGENT_NAME = /^[A-Za-z0-9:_-]+$/;
 const RUN_ID = /^[A-Za-z0-9-]{4,64}$/;
 const TASK_ID = /^T[0-9]+$/;
 const OPS_ATTEMPTS = 3;
+// Ops agents only run one command and copy its answer line back, so they run on a small model at low
+// effort; the last attempt inherits the session model in case the small one keeps altering the copy.
+const OPS_MODEL = 'haiku';
+// A task may name the model of its implementer (`model`) and reviewer (`reviewModel`); any other
+// value (the helper refuses one at load) leaves the agent definition's model.
+const TASK_MODELS = ['haiku', 'sonnet', 'opus'];
+const modelOf = value => (TASK_MODELS.includes(value) ? { model: value } : {});
+// The reviewer runs on the task's `reviewModel`, else on the task's own `model`: a cheap
+// implementer's work (and its fix rounds) is never judged by a more expensive model by default.
+const reviewModelOf = r => (TASK_MODELS.includes(r.reviewModel) ? r.reviewModel : r.model);
+// A rejected review sends the task back to its implementer with the findings at most this many
+// times; the next rejection blocks it.
+const REVIEW_FIX_ROUNDS = 2;
+const OPS_EFFORT = 'low';
+// `verify` and `merge` run the repo's verify command (often 30+ minutes), longer than the Bash tool's
+// 10-minute foreground limit, which killed merges half-way. A background Bash job does not help: a
+// workflow agent cannot wait for its notification. So these run detached through ops-detach.js (next
+// to the helper script), and the ops agent waits for them in slices shorter than the limit.
+const LONG_OPS = new Set(['verify', 'merge']);
 // Values the helper hands back before they go into prompts and command lines.
 const GIT_REF = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]+$/;
 // Everything bash still expands inside double quotes, plus control characters (C0, DEL, C1) and the
@@ -25,8 +42,9 @@ const UNSAFE_PATH = /["$`\\!]|[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 const OTHER_SPACE = /(?! )\s/;
 const STOPPED_MAX = 300;
 // How long a successful `sync` keeps the run lock fresh. The runtime throws on reading the clock or
-// asking for random numbers, so freshness is tracked with a timer of this length.
-const REFRESH_MS = 10 * 60 * 1000;
+// asking for random numbers, so freshness is tracked with a timer of this length. The lock goes stale
+// after six hours and every refresh is an agent call, so 30 minutes keeps a wide margin cheaply.
+const REFRESH_MS = 30 * 60 * 1000;
 
 // ---- arguments (all checks happen before the first agent call) ---------------------------------
 
@@ -63,6 +81,12 @@ if (typeof args.takeover === 'string' && !RUN_ID.test(args.takeover)) {
   throw new Error(`args.takeover must match ${RUN_ID.source}`);
 }
 const takeoverArgs = typeof args.takeover === 'string' ? ['takeover', args.takeover] : args.takeover ? ['takeover'] : [];
+// `true`: a failed task does not stop the run. Tasks that do not depend on it keep starting; its
+// dependents stay `todo`. Default: the first failure stops new starts and the running tasks finish.
+if (args.keepGoing !== undefined && typeof args.keepGoing !== 'boolean') {
+  throw new Error('args.keepGoing must be true or false');
+}
+const keepGoing = args.keepGoing === true;
 
 // ---- helper calls ------------------------------------------------------------------------------
 
@@ -79,8 +103,12 @@ function quoteText(text, max = 600) {
 }
 
 const isGitRef = value => typeof value === 'string' && GIT_REF.test(value);
+// A Windows drive path (`C:/...`) counts as absolute too: that is what git reports for worktrees there.
 const isSafePath = value =>
-  typeof value === 'string' && value.startsWith('/') && !UNSAFE_PATH.test(value) && !OTHER_SPACE.test(value);
+  typeof value === 'string' &&
+  (value.startsWith('/') || /^[A-Za-z]:\//.test(value)) &&
+  !UNSAFE_PATH.test(value) &&
+  !OTHER_SPACE.test(value);
 
 // The first `max` UTF-16 units of `value`, moved back before a surrogate pair the cut would split.
 function cut(value, max) {
@@ -106,7 +134,41 @@ const OPS_SCHEMA = {
   additionalProperties: false,
 };
 
+const detachPath = `${scriptPath.replace(/\/[^/]*$/, '')}/ops-detach.js`;
+
+// The file a detached command writes its output to: next to the ledger, one per command and task.
+function detachedOut(command) {
+  const [name, , id] = command.split(' ');
+  return `${ledgerPath.replace(/\.json$/, '')}.ops-${name}-${String(id || 'run').replace(/[^A-Za-z0-9_-]/g, '')}.out`;
+}
+
 function opsPrompt(command) {
+  if (LONG_OPS.has(command.split(' ')[0])) {
+    const out = detachedOut(command);
+    return [
+      'You run one long shell command for an automated workflow and report its output.',
+      '',
+      'It can take up to two hours, longer than the Bash tool allows, so it runs detached. Step 1: run this',
+      'once, in the foreground, with the Bash tool, exactly as written (it prints STARTED or RUNNING and',
+      'returns at once):',
+      '',
+      `node "${detachPath}" start "${out}" "${scriptPath}" ${command}`,
+      '',
+      'Step 2: run this in the foreground with the Bash tool and a timeout of 600000 ms, exactly as written.',
+      'It waits up to 9 minutes. While it prints only PENDING, run it again, as often as needed (that is',
+      'expected, not a failure). When it prints NOT RUNNING, stop and answer with that. Never use',
+      'run_in_background, never run step 1 twice, never run any other command, and do not try to fix',
+      'anything the output reports:',
+      '',
+      `node "${detachPath}" wait "${out}"`,
+      '',
+      'Answer with `stdout` set to the complete output of the last step 2 run (the one that did not print',
+      'just PENDING), copied verbatim, character for character, however long it is. Do not summarise,',
+      'shorten, abridge or truncate it; do not reformat, pretty-print, re-indent or reorder it; do not drop,',
+      'rename or add any field; do not add any comment or explanation. Its JSON line ends with a check over',
+      'its content (`len` and `sum`): the workflow rejects any copy that differs and runs the command again.',
+    ].join('\n');
+  }
   return [
     'You run exactly one shell command for an automated workflow and report its output.',
     '',
@@ -203,7 +265,8 @@ async function runOps(command) {
   for (let attempt = 1; attempt <= OPS_ATTEMPTS; attempt++) {
     let result;
     try {
-      result = await agent(opsPrompt(command), { schema: OPS_SCHEMA });
+      const small = attempt < OPS_ATTEMPTS ? { model: OPS_MODEL, effort: OPS_EFFORT } : {};
+      result = await agent(opsPrompt(command), { schema: OPS_SCHEMA, ...small });
     } catch (error) {
       result = null;
       log(`helper call failed (${name}): ${error && error.message}`);
@@ -299,7 +362,27 @@ const list = value => (Array.isArray(value) ? value : value == null || value ===
 const bullets = (items, none) => (items.length ? items.map(x => `- ${x}`).join('\n') : `- ${none}`);
 const text = value => (value == null ? '' : String(value).trim());
 
-function implementerPrompt(t, place, failure) {
+// The findings of a rejected review, as lines for the implementer, at most 4000 characters.
+function reviewFindingsText(review) {
+  const lines = list(review.findings)
+    .filter(f => f && f.message)
+    .map(f => {
+      const where = f.file ? ` (${f.file}${Number.isInteger(f.line) ? `:${f.line}` : ''})` : '';
+      return `- [${f.severity || 'unrated'}]${where} ${String(f.message)}`;
+    });
+  const unmet = [
+    review.acceptance_met === false ? 'acceptance not met' : '',
+    review.scope_ok === false ? 'files outside the scope' : '',
+    review.constraints_ok === false ? 'a constraint broken' : '',
+  ].filter(Boolean);
+  return [
+    `Verdict: ${text(review.verdict) || 'none'}${unmet.length ? ` (${unmet.join(', ')})` : ''}`,
+    ...(lines.length ? lines : ["- (no findings listed: the reviewer's flags contradict its verdict; check the outcome and constraints again)"]),
+    `Reviewer's evidence: ${text(review.evidence) || '(none)'}`,
+  ].join('\n').slice(0, 4000);
+}
+
+function implementerPrompt(t, place, failure, review = null) {
   const files = list(t.files).map(String);
   const deps = list(t.dependsOn).map(String);
   const parts = [
@@ -346,6 +429,16 @@ function implementerPrompt(t, place, failure) {
       '```',
       String(failure).slice(-4000),
       '```'
+    );
+  }
+  if (review) {
+    parts.push(
+      '',
+      'REVIEW FINDINGS:',
+      'An independent reviewer rejected the work already committed in this worktree. Fix every finding',
+      'in the same worktree and commit again. A finding that needs a file outside the scope or contradicts',
+      'the outcome above is escalated (stop and report), never worked around by loosening a check.',
+      reviewFindingsText(review)
     );
   }
   return parts.join('\n');
@@ -480,16 +573,30 @@ function finishTask(t, status, note, failure = true) {
   if (failure && status !== 'merged' && stopped === null) stopped = `${t.id} ${status}: ${note}`;
 }
 
-async function block(t, note, failure = true) {
+// `reviewed`: a review blocked the task, so the helper records the branch head it judged; a restart
+// of that unchanged head goes to the implementer, never straight back to review.
+async function block(t, note, failure = true, reviewed = false) {
   if (TASK_ID.test(t.id)) {
-    const answer = await ops('status', t.id, 'blocked', quoteText(note));
+    const answer = await ops('status', t.id, 'blocked', quoteText(note), ...(reviewed ? ['reviewed'] : []));
     if (!answer.ok) note = `${note} (ledger not updated: ${answer.error || 'no answer'})`;
   }
   finishTask(t, 'blocked', note, failure);
 }
 
+// A merge that failed for a passing reason (no answer from the helper, a merge an earlier call left
+// half done) is run once more: a repeated merge is safe. A conflict, a failed combined check, files
+// in the way or a relay that keeps altering answers fail again the same way, so they are not retried.
+const mergeRetryable = answer =>
+  !answer.conflicts &&
+  !/combined check failed|untracked files|conflicts with|altered in transit/.test(String(answer.error || '')) &&
+  !answer.locked;
+
 async function merge(t) {
-  const merged = await ops('merge', t.id);
+  let merged = await ops('merge', t.id);
+  if (!merged.ok && mergeRetryable(merged)) {
+    log(`${t.id}: merge failed (${merged.error || 'unknown error'}); trying once more`);
+    merged = await ops('merge', t.id);
+  }
   if (!merged.ok) return block(t, `merge failed: ${merged.error || 'unknown error'}`);
   finishTask(t, 'merged', `merged @ ${merged.sha || '?'}`);
 }
@@ -533,42 +640,91 @@ async function driveTask(t) {
 
   const place = await ops('worktree', t.id);
   if (!place.ok) return block(t, `worktree failed: ${place.error || 'unknown error'}`);
+  // The helper reports Windows worktree paths (`C:\...`) with backslashes; prompts and checks use
+  // forward slashes. Only a drive path is converted: a backslash anywhere else stays unsafe.
+  if (typeof place.worktree === 'string' && /^[A-Za-z]:\\/.test(place.worktree)) {
+    place.worktree = place.worktree.split('\\').join('/');
+  }
   if (!isSafePath(place.worktree)) return block(t, 'worktree failed: the helper returned an unsafe worktree path');
   if (!isGitRef(place.branch)) return block(t, 'worktree failed: the helper returned an invalid branch name');
   if (!isGitRef(place.base)) return block(t, 'worktree failed: the helper returned an invalid base ref');
   const diffBase = place.base.startsWith('task/') ? place.base : prepared.start || place.base;
 
-  if ((await runAgent(implementerPrompt(r, place), { agentType: implementerType })) == null) {
-    return block(t, 'the implementer did not finish');
-  }
-  let checked = await verify(t);
-  if (!checked.ok) {
-    log(`${t.id}: verification failed (${checked.error}); one more implementer attempt`);
-    if ((await runAgent(implementerPrompt(r, place, checked.output), { agentType: implementerType })) == null) {
-      return block(t, `the implementer did not finish its retry after: ${checked.error}`);
+  // A restarted task whose branch already has commits that no review has judged yet is verified
+  // first: when it passes, the work is done and only the review is missing, so no implementer runs.
+  let checked = null;
+  let failure = null;
+  const unreviewed =
+    Number.isInteger(place.commits) && place.commits > 0 && typeof place.head === 'string' && place.head !== place.reviewedHead;
+  if (unreviewed) {
+    const pre = await verify(t);
+    if (pre.ok) {
+      log(`${t.id}: the branch already passes verification; going straight to review`);
+      checked = pre;
+    } else {
+      failure = pre.output;
     }
-    checked = await verify(t);
-    if (!checked.ok) return block(t, `verification failed twice: ${checked.error}`);
   }
 
-  const review = await runAgent(reviewerPrompt(r, place, diffBase, checked.tail), {
-    agentType: reviewerType,
-    schema: REVIEW_SCHEMA,
-  });
-  if (review == null || typeof review !== 'object') return block(t, 'the reviewer did not finish');
-  if (review.verdict !== 'verified') {
-    const findings = list(review.findings)
-      .map(f => (f && f.message ? String(f.message) : ''))
-      .filter(Boolean)
-      .join('; ');
-    return block(t, `review ${review.verdict || 'without verdict'}: ${findings || text(review.evidence) || 'no details'}`);
+  // The implementer, then verification, with one more implementer attempt on a failed verification.
+  // Answers { ok: true, tail } or { note } for the block. `reviewed` carries the findings of a
+  // rejected review into the prompt.
+  const implementAndVerify = async (verifyFailure, reviewed) => {
+    if ((await runAgent(implementerPrompt(r, place, verifyFailure, reviewed), { agentType: implementerType, ...modelOf(r.model) })) == null) {
+      return { note: 'the implementer did not finish' };
+    }
+    let done = await verify(t);
+    if (!done.ok) {
+      log(`${t.id}: verification failed (${done.error}); one more implementer attempt`);
+      if ((await runAgent(implementerPrompt(r, place, done.output, reviewed), { agentType: implementerType, ...modelOf(r.model) })) == null) {
+        return { note: `the implementer did not finish its retry after: ${done.error}` };
+      }
+      done = await verify(t);
+      if (!done.ok) return { note: `verification failed twice: ${done.error}` };
+    }
+    return done;
+  };
+
+  if (checked === null) {
+    const first = await implementAndVerify(failure, null);
+    if (first.note) return block(t, first.note);
+    checked = first;
   }
-  const consistent =
-    review.acceptance_met === true &&
-    review.scope_ok === true &&
-    review.constraints_ok === true &&
-    !list(review.findings).some(f => f && f.severity === 'high');
-  if (!consistent) return block(t, 'review inconsistent');
+
+  // A rejected review goes back to the implementer with its findings, up to REVIEW_FIX_ROUNDS times.
+  // `needs_input` asks a human, so it blocks at once.
+  let review = null;
+  for (let round = 0; ; round++) {
+    review = await runAgent(reviewerPrompt(r, place, diffBase, checked.tail), {
+      agentType: reviewerType,
+      schema: REVIEW_SCHEMA,
+      ...modelOf(reviewModelOf(r)),
+    });
+    if (review == null || typeof review !== 'object') return block(t, 'the reviewer did not finish');
+    const consistent =
+      review.verdict === 'verified' &&
+      review.acceptance_met === true &&
+      review.scope_ok === true &&
+      review.constraints_ok === true &&
+      !list(review.findings).some(f => f && f.severity === 'high');
+    if (consistent) break;
+    let note = 'review inconsistent';
+    if (review.verdict !== 'verified') {
+      const findings = list(review.findings)
+        .map(f => (f && f.message ? String(f.message) : ''))
+        .filter(Boolean)
+        .join('; ');
+      note = `review ${review.verdict || 'without verdict'}: ${findings || text(review.evidence) || 'no details'}`;
+    }
+    if (review.verdict === 'needs_input' || round >= REVIEW_FIX_ROUNDS) return block(t, note, true, true);
+    log(`${t.id}: ${note}; fix round ${round + 1} of ${REVIEW_FIX_ROUNDS}`);
+    const fixed = await implementAndVerify(null, review);
+    // block(.., failure, reviewed = true): the helper records the task branch's head as it is now.
+    // That is the rejected head if the fix round committed nothing, else the fix round's unreviewed
+    // commits; either way a restart of that unchanged head goes to the implementer, not to review.
+    if (fixed.note) return block(t, `${fixed.note} (fix round ${round + 1} after: ${note})`, true, true);
+    checked = fixed;
+  }
 
   const marked = await ops('status', t.id, 'verified', quoteText(`review verified: ${text(review.evidence)}`, 2000));
   if (!marked.ok) return block(t, `could not record verified: ${marked.error || 'unknown error'}`);
@@ -626,6 +782,14 @@ async function syncIdle() {
   while (syncing !== null) await syncing;
 }
 
+// The `sync` arguments: the run id, then the ids this run already knows, which the helper leaves out
+// of its answer. `learn` skips a known id anyway, so the answer only has to carry new tasks, and a
+// heartbeat answer stays short instead of listing the whole ledger for the relay to copy every time.
+function syncArgs() {
+  const known = [...tasks.keys()].filter(id => TASK_ID.test(id));
+  return known.length > 0 ? [runId, 'known', known.join(',')] : [runId];
+}
+
 // Returns whether the `sync` succeeded. `label` names a failure in the log. A `sync` is in progress
 // from the moment its helper call is made (at once when the serialised helper path is idle, else when
 // its turn comes) until its answer has been taken in; the helper path never runs two at once.
@@ -641,7 +805,7 @@ async function syncTasks(label = 'sync') {
     // The run id lets the helper refresh the lock only while it still names this run.
     answer = await serialised(() => {
       syncing = settled;
-      return runOps(opsLine('sync', [runId]));
+      return runOps(opsLine('sync', syncArgs()));
     });
     if (answer.ok) {
       refreshDue = false;
@@ -731,7 +895,8 @@ if (agentsError !== null) stopped = stopped === null ? agentsError : `${agentsEr
 phase('run tasks');
 try {
   while (!badStart && agentsError === null) {
-    if (stopped === null) {
+    // Inside this loop `stopped` is only set by a failed task (badStart and agentsError never enter it).
+    if (stopped === null || keepGoing) {
       // `running` grows inside this loop, so two tasks that become ready together never overlap, and
       // no more than `maxParallel` start; a task waiting for a free slot starts when one frees up.
       for (const t of tasks.values()) if (running.size < maxParallel && !running.has(t.id) && ready(t)) start(t);
@@ -741,7 +906,7 @@ try {
       await syncTasks(); // also refreshes the run lock
       continue;
     }
-    if (stopped !== null) break;
+    if (stopped !== null && !keepGoing) break;
     await syncTasks();
     if (![...tasks.values()].some(ready)) break;
   }

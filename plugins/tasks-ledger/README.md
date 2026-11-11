@@ -29,7 +29,7 @@ the `.claude/verify.cmd` opt-in) are in [`rules/conventions.md`](rules/conventio
 
 ### Long runs
 
-The workflow keeps its run lock fresh with a `sync` at least every 10 minutes while an implementer or
+The workflow keeps its run lock fresh with a `sync` at least every 30 minutes while an implementer or
 reviewer is working, and right before and after each of them when one is due. A failed refresh is logged
 and does not stop the run. Two limits remain:
 
@@ -49,18 +49,47 @@ the check counts as a failed attempt, and the command is run again, up to 3 time
 call fails with `helper answer was altered in transit`. A changed answer is never used, even an
 `ok: false` one. Whitespace around the JSON values does not count as a change.
 
+Ops agents only run a command and copy its line, so they run on `haiku` at low effort. The third and
+last attempt of a call inherits the session model. `verify` and `merge` run the repository's check,
+which can take longer than the Bash tool's 10-minute limit. They run detached through
+`scripts/ops-detach.js`, and the ops agent waits for them in slices of at most 9 minutes.
+
 The helper also keeps answers short, since long answers are the ones relays tend to abridge. `prepare`,
 `sync` and `finish` list only each task's scheduling fields (`id`, `status`, `dependsOn`, `files`,
-`branch`, `base`, `worktree`, `pr` and `needsAcceptance`). Right before a task is dispatched, the
+`branch`, `base`, `worktree`, `pr` and `needsAcceptance`). `sync` also leaves out the tasks the
+workflow names as already known (`known T1,T2,…`), so a lock refresh lists only tasks the workflow
+does not know yet (new from the inbox, also when an earlier answer was lost). Right before a task is
+dispatched, the
 workflow fetches its full record with `task <ledger> <id>` and takes the title, acceptance, proof,
 budget and constraints for the implementer and reviewer prompts from there. A task is blocked as not
-dispatchable only when that record has no proof or no budget.
+dispatchable only when that record has no proof or no budget. A task may name the model of its
+implementer (`model`) and of its reviewer (`reviewModel`): `haiku`, `sonnet` or `opus`. Without a
+`reviewModel` the reviewer runs on the task's `model`; with neither, the agent definitions' models apply.
+The helper refuses a ledger that names any other value.
+
+A rejected review sends the task back to its implementer with the reviewer's findings, in the same
+worktree, up to two times; each fix round is verified and reviewed again (on the same review model),
+and the next rejection blocks the task. A `needs_input` verdict blocks at once.
 
 ### Parallel tasks
 
 The workflow runs at most 3 tasks at once. A ledger can set its own limit with the top-level
 `maxParallel` (an integer from 1 to 16). Tasks with overlapping `files` never run together, whatever
 the limit. A ready task waiting for a free slot starts as soon as one of the running tasks ends.
+
+### Removing worktrees after a merge
+
+Set `"removeWorktreeAfterMerge": true` at the top level of the ledger (boolean, default `false`) to remove
+a task's worktree as soon as the task merges; build output can take gigabytes. The task branch stays, so
+a dependant still starts from it. The `merge` answer then carries `worktreeRemoved` (the removed path) or
+`worktreeKept` (the reason it stayed, also recorded in the task's evidence). A worktree with tracked or
+untracked changes, whose status cannot be read, or that git refuses to remove (locked) is kept; the merge
+itself still succeeds. Ignored files, including ones ignored by global excludes such as `.env` or local
+settings, go with the worktree without a warning. The removal never uses `--force`. If git's removal
+fails half way (a file held open by an editor), the folder that is left is no longer a worktree: the
+answer carries `worktreeRemoved` and `worktreeLeftover` (the path), and the task's evidence says so.
+A later `worktree <Tn>` for that task fails while the leftover folder exists (`git worktree add`
+refuses a non-empty path): delete the folder first.
 
 ### Cleanup
 
@@ -110,8 +139,13 @@ Plugin agents are namespaced by the plugin name, so the workflow starts `tasks-l
 
 | Arg | Default | Use |
 |---|---|---|
-| `implementerAgent` | `tasks-ledger:task-implementer` | Agent type started once per task (and once more on a verification retry). |
+| `implementerAgent` | `tasks-ledger:task-implementer` | Agent type started once per task (once more on a verification retry, and once per review fix round). |
 | `reviewerAgent` | `tasks-ledger:reviewer` | Agent type that reviews each task's diff; it must answer with the JSON verdict the workflow asks for. |
+
+One more optional arg changes what a failure does: `keepGoing: true` lets the run continue past a blocked
+task (tasks that do not depend on it keep starting; its dependents stay `todo`). The default `false` stops
+new starts at the first failure. `keepGoing` suits failures specific to one task; a shared one (a broken
+verify command, a failing helper) would block every independent task in turn.
 
 A workflow's `agent()` call matches its agent type exactly (verified against Claude Code 2.1.265): a bare
 name such as `reviewer` reaches a project (`.claude/agents/`) or user (`~/.claude/agents/`) agent of that
@@ -152,6 +186,7 @@ agents/                      task-implementer, reviewer
 hooks/                       hooks.json, dispatch-guard.js, verify-gate.js
 workflows/tasks-engine.js    the workflow /tasks runs
 scripts/tasks-git.js         every ledger and git side effect of the workflow (one JSON line per call)
+scripts/ops-detach.js        runs verify and merge detached, waits for them in 9-minute slices
 scripts/verify-consent.js    approve, list and revoke verify.cmd approvals
 schemas/tasks.schema.json    ledger schema
 rules/conventions.md         conventions the skills, agents and hooks follow

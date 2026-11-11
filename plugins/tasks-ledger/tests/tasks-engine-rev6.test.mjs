@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ENGINE, task } from './helpers/git-sandbox.mjs';
-import { fakeRelay } from './helpers/relay.mjs';
+import { fakeRelay, opsCommand } from './helpers/relay.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const body = readFileSync(ENGINE, 'utf8').replace(/^export\s+/m, '');
@@ -30,9 +30,9 @@ async function runEngine(ledgerTasks, { answers = {}, runId = 'test1' } = {}) {
   const agent = async (prompt, opts) => {
     if (opts.agentType !== undefined) return /^TASK: /.test(prompt) ? 'done' : GOOD_REVIEW;
     prompts.push(prompt);
-    const line = prompt.match(/node "[^"]*" (.*)\n/)[1];
+    const line = opsCommand(prompt);
     opsLines.push(line);
-    const [op, , ...rest] = line.replace(/"/g, '').split(' ');
+    const [op, , ...rest] = line.replace(/"/g, '').replace(/ known \S+$/, '').split(' '); // known ids: rev 19
     return reply(op, rest[0], canned[op] ? canned[op](...rest) : { ok: true });
   };
   const args = { ledger: '/tmp/ledger.json', script: '/tmp/tasks-git.js', runId };
@@ -42,14 +42,14 @@ async function runEngine(ledgerTasks, { answers = {}, runId = 'test1' } = {}) {
 
 const syncLines = opsLines => opsLines.filter(l => l.startsWith('sync '));
 
-test('amendment 1: every sync call carries the run id as its one argument', async () => {
+test('amendment 1: every sync call carries the run id, then the known task ids (rev 19)', async () => {
   const { result, opsLines } = await runEngine([task('T1', ['src/**']), task('T2', ['lib/**']), task('T3', ['src/a/**'])], {
     runId: 'run-2026-abc',
   });
   assert.equal(result.stopped, null);
   const syncs = syncLines(opsLines);
   assert.ok(syncs.length >= 2, opsLines.join('\n'));
-  for (const line of syncs) assert.equal(line, 'sync "/tmp/ledger.json" run-2026-abc');
+  for (const line of syncs) assert.equal(line, 'sync "/tmp/ledger.json" run-2026-abc known T1,T2,T3');
 });
 
 test('amendment 1: the sync on an empty ledger also carries the run id', async () => {
@@ -64,7 +64,7 @@ test('amendment 1: the sync ops prompt keeps its pinned form', async () => {
   const syncPrompts = prompts.filter(p => /node "\/tmp\/tasks-git\.js" sync /.test(p));
   assert.ok(syncPrompts.length >= 1);
   for (const p of syncPrompts) {
-    assert.ok(p.includes('node "/tmp/tasks-git.js" sync "/tmp/ledger.json" test1\n'), p);
+    assert.ok(p.includes('node "/tmp/tasks-git.js" sync "/tmp/ledger.json" test1 known T1\n'), p);
     assert.equal(p.indexOf('node "'), p.lastIndexOf('node "'), p);
   }
 });

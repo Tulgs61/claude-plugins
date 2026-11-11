@@ -16,7 +16,7 @@ import { ENGINE, SCRIPT } from './helpers/git-sandbox.mjs';
 import { sealed } from './helpers/relay.mjs';
 
 const HELPER_COMMANDS = ['cleanup', 'finish', 'merge', 'prepare', 'prs', 'status', 'sync', 'task', 'verify', 'worktree'];
-const ENGINE_ARGS = ['implementerAgent', 'ledger', 'reviewerAgent', 'runId', 'script', 'takeover'];
+const ENGINE_ARGS = ['implementerAgent', 'keepGoing', 'ledger', 'reviewerAgent', 'runId', 'script', 'takeover'];
 const SKILLS = ['dispatch', 'tasks', 'tasks-plan'];
 
 const skillText = name => readFileSync(new URL(`../skills/${name}/SKILL.md`, import.meta.url), 'utf8');

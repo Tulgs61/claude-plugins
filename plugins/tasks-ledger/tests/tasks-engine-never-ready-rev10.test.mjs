@@ -5,7 +5,7 @@ import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ENGINE, task } from './helpers/git-sandbox.mjs';
-import { fakeRelay } from './helpers/relay.mjs';
+import { fakeRelay, opsCommand } from './helpers/relay.mjs';
 
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 const body = readFileSync(ENGINE, 'utf8').replace(/^export\s+/m, '');
@@ -43,10 +43,10 @@ async function runEngine(ledgerTasks, { answers = {}, agentMinutes = 0 } = {}) {
       }
       return isImpl ? 'done' : GOOD_REVIEW;
     }
-    const line = prompt.match(/node "[^"]*" (.*)\n/)[1];
+    const line = opsCommand(prompt);
     opsLines.push(line);
     events.push(line);
-    const [op, , ...rest] = line.replace(/"/g, '').split(' ');
+    const [op, , ...rest] = line.replace(/"/g, '').replace(/ known \S+$/, '').split(' '); // known ids: rev 19
     counts[op] = (counts[op] || 0) + 1;
     return reply(op, rest[0], canned[op] ? canned[op](...rest, counts[op]) : { ok: true });
   };
@@ -65,7 +65,7 @@ const FIVE = ['T11', 'T12', 'T13', 'T14', 'T15'];
 
 test('amendment 14: five needsAcceptance tasks from a lock refresh during two running tasks are never started', async () => {
   const { result, events, opsLines } = await runEngine([task('T1', ['src/**']), task('T2', ['lib/**'])], {
-    agentMinutes: 11,
+    agentMinutes: 31,
     answers: {
       // Every agent boundary refreshes; the sixth sync comes while T1 and T2 are both running, and
       // T2 finishes while the five are still being blocked in the ledger.

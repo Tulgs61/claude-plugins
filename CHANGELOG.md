@@ -54,6 +54,68 @@ version `<version>` is tagged `<name>--v<version>`.
 
 ## tasks-ledger
 
+### [0.7.0] - 2026-11-03
+
+#### Added
+
+- Engine argument `keepGoing` (default `false`). With `true`, a blocked task no longer stops the run:
+  tasks that do not depend on it keep starting, its dependents stay `todo`, and the run ends as
+  `stopped` with every blocked task in `blocked`. Without it, the first failure still stops new starts.
+
+- `scripts/ops-detach.js` runs `verify` and `merge` detached and lets the ops agent wait for them in
+  slices of at most 9 minutes. A repository check that takes longer than the Bash tool's 10-minute
+  foreground limit no longer gets killed half-way through a merge. The runner keeps a heartbeat file
+  fresh. A second `start` while that heartbeat is fresh starts nothing, so a retried ops agent never
+  runs a merge twice at once. `wait` answers `NOT RUNNING` when there is neither a result nor a fresh
+  heartbeat (the runner died, or `start` never ran), which counts as a failed attempt instead of an
+  endless wait. It deletes a result once it has printed it, so no result is handed to a later call.
+- `merge` holds a lock in the integration worktree's git directory for its whole duration. A second
+  merge while the holder is alive fails with `another merge is running` (`locked: true`) and touches
+  nothing. A lock whose process is gone, or that is older than six hours, is taken over.
+- `worktree` also answers `commits` (beyond the base), `head` and `reviewedHead`. A restarted task
+  whose branch already has commits that no review has judged is verified first. When that passes,
+  the task goes straight to review and no implementer runs. When it fails, the implementer starts with
+  that failure as its previous attempt.
+- `status <id> blocked <evidence> reviewed` records the branch head a blocking review judged
+  (`reviewedHead`, new optional ledger field), and so does a `review inconsistent` block. A restart of
+  that unchanged head goes to the implementer again, never straight back to review. A task a review
+  blocked before this version has no `reviewedHead`: on restart it is verified and reviewed once more
+  without an implementer. The review gate still applies, so this costs a cycle but lets nothing through.
+- Optional task fields `model` and `reviewModel` (`haiku`, `sonnet` or `opus`) pick the model of that
+  task's implementer and reviewer, so a run can give small tasks a cheaper model. Unset, the agent
+  definition's model applies as before. `task` hands both through; a ledger naming another value is
+  refused when it is read. Without a `reviewModel` the reviewer runs on the task's `model`, so a cheap
+  implementer's work is not judged by a more expensive model by default.
+- Review fix rounds: a rejected review (or a `verified` one with a high finding) sends the task back to
+  its implementer with the findings, in the same worktree, up to two times; each round is verified and
+  reviewed again, and the next rejection blocks the task. `needs_input` still blocks at once.
+- Ledger option `removeWorktreeAfterMerge` (boolean, default `false`). With `true`, a task's worktree is
+  removed after the task merges (its build output can be gigabytes); the task branch stays, so
+  dependants still start from it. The `merge` answer carries `worktreeRemoved` (the path) or
+  `worktreeKept` (the reason). A worktree with tracked or untracked changes, whose status cannot be
+  read, or that git refuses to remove is kept and the merge still succeeds. Ignored files, including
+  ones ignored by global excludes such as `.env`, go with the worktree without a warning, and the
+  removal never uses `--force`. When git's removal fails half way (a file held open), the answer also
+  carries `worktreeLeftover`: the folder is left but is no longer a worktree.
+
+#### Changed
+
+- Ops agents run on `haiku` at low effort. Only the third and last attempt of a call inherits the
+  session model, in case the small model keeps altering the copy.
+- A merge that failed for a passing reason (no answer from the helper, for example) is run once more.
+  A conflict, a failed combined check, untracked files in the way, a merge lock held by another live
+  merge, or an answer the relay keeps altering is not retried.
+- Under its lock, `merge` first undoes a merge an earlier, killed call left half done (`MERGE_HEAD`
+  present) with `git merge --abort`. Other uncommitted changes to tracked files survive the abort and
+  are still refused.
+- Worktree paths that the helper reports as Windows drive paths with backslashes (`C:\…`) are
+  converted to forward slashes. A backslash anywhere else still makes the path unsafe.
+- Cheaper lock refreshes. The engine passes the ids it already knows (`sync <ledger> <runId> known
+  T1,T2,…`), and the helper leaves those tasks out of its answer, so a heartbeat no longer relays the
+  whole ledger. Tasks added through the inbox are still listed in full. The refresh interval goes from
+  10 to 30 minutes (the lock goes stale after six hours). In a 23-task run, `sync` relays were about
+  half of the helper agents' cost.
+
 ### [0.6.0] - 2026-10-24
 
 #### Added
