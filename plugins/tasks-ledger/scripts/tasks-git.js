@@ -197,7 +197,14 @@ function realOrSelf(p) {
   const rest = [];
   for (;;) {
     try {
-      return path.join(fs.realpathSync(head), ...rest);
+      // The native call also expands Windows 8.3 short names (DOCUME~1), which git lists by long name.
+      let real;
+      try {
+        real = fs.realpathSync.native(head);
+      } catch {
+        real = fs.realpathSync(head);
+      }
+      return path.join(real, ...rest);
     } catch {
       const up = path.dirname(head);
       if (up === head) return path.resolve(p);
@@ -1485,8 +1492,8 @@ function mergeUnderLock(ctx, id, intBranch, integration) {
 // With the ledger's `removeWorktreeAfterMerge`, a merged task's worktree goes (its build output can be
 // gigabytes); the branch stays, so dependants still start from it and `worktree` re-adds it on demand.
 // Only a worktree inside `<root>/.claude/worktrees` is removed (`worktreeKept` says "outside
-// .claude/worktrees" otherwise, like `cleanup`'s `outside`). A worktree with any uncommitted change, tracked or untracked, is kept, and so is one whose status
-// cannot be read or that git refuses to remove (locked): the merge itself has already succeeded, so
+// .claude/worktrees" otherwise, like `cleanup`'s `outside`). A worktree with any uncommitted
+// change, tracked or untracked, is kept, and so is one whose status cannot be read or that git refuses to remove (locked): the merge itself has already succeeded, so
 // none of these fails the call. Only ignored files (build output, and files ignored by global excludes
 // such as a local .env) go with the worktree, without a warning; the removal is a plain
 // `git worktree remove`, never `--force`, so git itself also refuses a worktree with changes.

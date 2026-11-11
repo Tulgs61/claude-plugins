@@ -100,7 +100,7 @@ test('a worktree on the task branch outside .claude/worktrees is kept', t => {
 
 // git cannot delete a file inside a read-only directory: `git worktree remove` deletes what it can and
 // the registration, then exits non-zero, leaving a plain folder.
-test('a half-failed removal clears the task worktree and reports the leftover', { skip: process.platform === 'win32' }, t => {
+test('a half-failed removal clears the task worktree and reports the leftover', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, t => {
   const sb = sandbox(t, { tasks: [task('T1', ['a/**'])], ledgerExtra: { removeWorktreeAfterMerge: true } });
   sb.ok('prepare', 'run-one');
   const w = sb.ok('worktree', 'T1').worktree;
@@ -109,12 +109,15 @@ test('a half-failed removal clears the task worktree and reports the leftover', 
   mkdirSync(dir);
   writeFileSync(path.join(dir, 'held.txt'), 'ignored\n');
   chmodSync(dir, 0o555);
-  t.after(() => { try { chmodSync(dir, 0o755); } catch {} });
   sb.commit(w, 'T1.txt', 'T1\n', 'T1: work');
   sb.ok('status', 'T1', 'verified', 'reviewed');
-  const r = sb.ok('merge', 'T1');
-  assert.equal(path.normalize(r.worktreeLeftover), path.normalize(w));
-  assert.equal(path.normalize(r.worktreeRemoved), path.normalize(w));
-  assert.equal(sb.taskOf('T1').worktree, null);
-  assert.match(sb.taskOf('T1').evidence, /partly removed/);
+  try {
+    const r = sb.ok('merge', 'T1');
+    assert.equal(path.normalize(r.worktreeLeftover), path.normalize(w));
+    assert.equal(path.normalize(r.worktreeRemoved), path.normalize(w));
+    assert.equal(sb.taskOf('T1').worktree, null);
+    assert.match(sb.taskOf('T1').evidence, /partly removed/);
+  } finally {
+    chmodSync(dir, 0o755);
+  }
 });
